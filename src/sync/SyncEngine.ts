@@ -1,0 +1,357 @@
+import { Plugin, TFile, Notice } from 'obsidian';
+import { GDocsPluginSettings, SyncMeta } from '../types';
+import { GoogleDocsAPI } from '../api/GoogleDocsAPI';
+import { TokenStore } from '../auth/TokenStore';
+import { GDocsPoller } from './GDocsPoller';
+import { FileWatcher } from './FileWatcher';
+import { ConflictResolver } from './ConflictResolver';
+import { gdocsToMarkdown } from '../converter/GDocsToMarkdown';
+import { markdownToGDocsRequests } from '../converter/MarkdownToGDocs';
+
+type PluginWithSettings = Plugin & {
+  settings: GDocsPluginSettings;
+  saveSettings(): Promise<void>;
+};
+
+// sha256 via Web Crypto (available in Electron/browser context)
+async function sha256(text: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(text);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Strip YAML frontmatter (--- ... ---) from note content before syncing
+function stripFrontmatter(content: string): string {
+  const match = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
+  return match ? match[1].trimStart() : content;
+}
+
+// Parse a Google Docs URL or raw document ID into a document ID
+function parseDocId(urlOrId: string): string {
+  const urlMatch = urlOrId.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
+  return urlMatch ? urlMatch[1] : urlOrId.trim();
+}
+
+export class SyncEngine {
+  private poller: GDocsPoller;
+  private fileWatcher: FileWatcher;
+  private conflictResolver: ConflictResolver;
+
+  // Prevents concurrent syncs of the same file. Key: file path or docId.
+  private syncQueue: Map<string, Promise<void>> = new Map();
+
+  // docId → last known Drive revision string (populated on start)
+  private syncedDocs: Map<string, string> = new Map();
+
+  constructor(
+    private plugin: PluginWithSettings,
+    private api: GoogleDocsAPI,
+    private tokenStore: TokenStore,
+  ) {
+    this.conflictResolver = new ConflictResolver();
+
+    this.poller = new GDocsPoller(
+      this.api,
+      (docId) => this.syncRemoteToLocal(docId),
+      this.plugin.settings.pollIntervalSeconds,
+    );
+
+    this.fileWatcher = new FileWatcher(this.plugin, async (file) => {
+      if (this.plugin.settings.autoSyncOnSave && (await this.shouldSync(file))) {
+        await this.syncLocalToRemote(file);
+      }
+    });
+  }
+
+  // ─── Lifecycle ────────────────────────────────────────────────────────────
+
+  async start(): Promise<void> {
+    // Discover all notes that already have a gdocs-id in their frontmatter
+    await this.loadSyncedDocs();
+
+    this.fileWatcher.start();
+    this.poller.start(this.syncedDocs);
+  }
+
+  stop(): void {
+    this.poller.stop();
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────────
+
+  /**
+   * Walk the vault and build the syncedDocs map from notes that have
+   * gdocs-id frontmatter. Also fetches the current revision for each
+   * so the poller has a baseline to compare against.
+   */
+  private async loadSyncedDocs(): Promise<void> {
+    const files = this.plugin.app.vault.getMarkdownFiles();
+
+    await Promise.allSettled(
+      files.map(async (file) => {
+        const meta = this.plugin.app.metadataCache.getFileCache(file);
+        const gdocsId: string | undefined = meta?.frontmatter?.['gdocs-id'];
+        if (!gdocsId) return;
+
+        try {
+          const revision = await this.api.getDocumentRevision(gdocsId);
+          this.syncedDocs.set(gdocsId, revision);
+        } catch {
+          // Doc may have been deleted or permissions revoked — skip silently
+          console.warn(`[SyncEngine] Could not load revision for doc ${gdocsId}`);
+        }
+      }),
+    );
+  }
+
+  /**
+   * Returns true if this file should be automatically synced based on:
+   * 1. It already has a gdocs-id (explicitly linked)
+   * 2. Its tags include the configured syncTag
+   * 3. Its path starts with one of the configured syncFolders
+   */
+  async shouldSync(file: TFile): Promise<boolean> {
+    const meta = this.plugin.app.metadataCache.getFileCache(file);
+    if (!meta) return false;
+
+    // Already linked to a Google Doc
+    if (meta.frontmatter?.['gdocs-id']) return true;
+
+    // Check tags
+    const { syncTag, syncFolders } = this.plugin.settings;
+    const tags: string[] = meta.frontmatter?.tags ?? [];
+    const tagList = Array.isArray(tags) ? tags : [tags];
+    if (syncTag && tagList.includes(syncTag)) return true;
+
+    // Check folder membership
+    for (const folder of syncFolders) {
+      if (file.path.startsWith(folder.replace(/\/$/, '') + '/')) return true;
+    }
+
+    return false;
+  }
+
+  // ─── Core sync operations ─────────────────────────────────────────────────
+
+  /**
+   * Push local note content to its linked Google Doc.
+   * Clears the document and re-inserts all content from scratch (safe for v1;
+   * v2 could do diff-based updates to preserve comments and suggestions).
+   */
+  async syncLocalToRemote(file: TFile): Promise<void> {
+    // Deduplicate concurrent syncs of the same file
+    const existing = this.syncQueue.get(file.path);
+    if (existing) return existing;
+
+    const task = this._syncLocalToRemote(file);
+    this.syncQueue.set(file.path, task);
+    try {
+      await task;
+    } finally {
+      this.syncQueue.delete(file.path);
+    }
+  }
+
+  private async _syncLocalToRemote(file: TFile): Promise<void> {
+    const meta = this.plugin.app.metadataCache.getFileCache(file);
+    let docId: string | undefined = meta?.frontmatter?.['gdocs-id'];
+
+    // If no doc is linked yet, create one
+    if (!docId) {
+      docId = await this.createDocForNote(file);
+    }
+
+    const rawContent = await this.plugin.app.vault.read(file);
+    const bodyContent = stripFrontmatter(rawContent);
+    const hash = await sha256(bodyContent);
+
+    // Skip if content hasn't changed since last sync
+    const lastHash: string | undefined = meta?.frontmatter?.['gdocs-hash'];
+    if (lastHash && lastHash === hash) return;
+
+    try {
+      await this.api.clearDocument(docId);
+      const requests = markdownToGDocsRequests(bodyContent);
+      if (requests.length > 0) {
+        await this.api.batchUpdate(docId, requests);
+      }
+
+      // Record updated revision so the poller doesn't immediately fire back
+      const newRevision = await this.api.getDocumentRevision(docId);
+      this.syncedDocs.set(docId, newRevision);
+
+      await this.updateFrontmatter(file, {
+        gdocsId: docId,
+        gdocsUrl: `https://docs.google.com/document/d/${docId}/edit`,
+        lastSyncAt: new Date().toISOString(),
+        lastSyncHash: hash,
+      });
+    } catch (err) {
+      new Notice(`⚠ GDocs Sync: Failed to sync "${file.basename}" to Google Docs`);
+      console.error('[SyncEngine] syncLocalToRemote error:', err);
+      throw err;
+    }
+  }
+
+  /**
+   * Pull a Google Doc's current content and write it to the matching local note.
+   * Skips the write if the conflict resolver determines local wins.
+   */
+  async syncRemoteToLocal(docId: string): Promise<void> {
+    const existing = this.syncQueue.get(docId);
+    if (existing) return existing;
+
+    const task = this._syncRemoteToLocal(docId);
+    this.syncQueue.set(docId, task);
+    try {
+      await task;
+    } finally {
+      this.syncQueue.delete(docId);
+    }
+  }
+
+  private async _syncRemoteToLocal(docId: string): Promise<void> {
+    // Find the local file that owns this docId
+    const files = this.plugin.app.vault.getMarkdownFiles();
+    const file = files.find((f) => {
+      const cache = this.plugin.app.metadataCache.getFileCache(f);
+      return cache?.frontmatter?.['gdocs-id'] === docId;
+    });
+
+    if (!file) {
+      console.warn(`[SyncEngine] No local file found for docId ${docId}`);
+      return;
+    }
+
+    try {
+      const doc = await this.api.getDocument(docId);
+      const remoteMarkdown = gdocsToMarkdown(doc);
+
+      // Conflict resolution: compare mod times
+      const localStat = file.stat;
+      const localModified = new Date(localStat.mtime);
+      const meta = this.plugin.app.metadataCache.getFileCache(file);
+      const lastSyncAt: string | undefined = meta?.frontmatter?.['gdocs-last-sync'];
+      // Use the lastSyncAt as proxy for remote's "last written" time if available
+      const remoteModified = lastSyncAt ? new Date(lastSyncAt) : new Date(0);
+
+      const winner = this.conflictResolver.resolve(localModified, remoteModified);
+      if (winner === 'local') {
+        // Local wins — push local content to remote instead
+        await this.syncLocalToRemote(file);
+        return;
+      }
+
+      // Remote wins — overwrite local content (preserving frontmatter)
+      const rawContent = await this.plugin.app.vault.read(file);
+      const frontmatterMatch = rawContent.match(/^(---\n[\s\S]*?\n---\n?)/);
+      const existingFrontmatter = frontmatterMatch ? frontmatterMatch[1] : '';
+
+      const newContent = existingFrontmatter
+        ? existingFrontmatter + remoteMarkdown
+        : remoteMarkdown;
+
+      await this.plugin.app.vault.modify(file, newContent);
+
+      const hash = await sha256(remoteMarkdown);
+      await this.updateFrontmatter(file, {
+        lastSyncAt: new Date().toISOString(),
+        lastSyncHash: hash,
+      });
+    } catch (err) {
+      console.error(`[SyncEngine] syncRemoteToLocal error for ${docId}:`, err);
+      new Notice(`⚠ GDocs Sync: Failed to pull changes for doc ${docId}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Create a new Google Doc for a note that doesn't have one yet.
+   * Writes the gdocs-id and gdocs-url to frontmatter, and adds the doc to
+   * the polling map.
+   */
+  async createDocForNote(file: TFile): Promise<string> {
+    const { documentId, documentUrl } = await this.api.createDocument(file.basename);
+
+    // Bootstrap the revision so the poller starts from a known state
+    const revision = await this.api.getDocumentRevision(documentId);
+    this.syncedDocs.set(documentId, revision);
+
+    await this.updateFrontmatter(file, {
+      gdocsId: documentId,
+      gdocsUrl: documentUrl,
+      lastSyncAt: new Date().toISOString(),
+      lastSyncHash: '',
+    });
+
+    new Notice(`✓ Created Google Doc for "${file.basename}"`);
+    return documentId;
+  }
+
+  /**
+   * Import an existing Google Doc into the vault as a new Markdown note.
+   * The note is placed in the vault root; v2 should allow choosing a folder.
+   */
+  async importGoogleDoc(docIdOrUrl: string): Promise<void> {
+    const docId = parseDocId(docIdOrUrl);
+    if (!docId) {
+      new Notice('⚠ GDocs Sync: Could not parse document ID from the provided input.');
+      return;
+    }
+
+    try {
+      const doc = await this.api.getDocument(docId);
+      const markdown = gdocsToMarkdown(doc);
+      const hash = await sha256(markdown);
+
+      const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
+
+      // Build frontmatter block
+      const frontmatter = [
+        '---',
+        `gdocs-id: ${docId}`,
+        `gdocs-url: "${docUrl}"`,
+        `gdocs-last-sync: ${new Date().toISOString()}`,
+        `gdocs-hash: ${hash}`,
+        '---',
+        '',
+      ].join('\n');
+
+      const noteContent = frontmatter + markdown;
+
+      // Use the Google Doc title as the note filename, sanitised for the OS
+      const safeTitle = (doc.title || 'Imported Google Doc')
+        .replace(/[/\\:*?"<>|]/g, '-')
+        .trim();
+
+      const notePath = `${safeTitle}.md`;
+      await this.plugin.app.vault.create(notePath, noteContent);
+
+      // Track for polling
+      const revision = await this.api.getDocumentRevision(docId);
+      this.syncedDocs.set(docId, revision);
+
+      new Notice(`✓ Imported "${doc.title}" as ${notePath}`);
+    } catch (err) {
+      console.error('[SyncEngine] importGoogleDoc error:', err);
+      new Notice(`⚠ GDocs Sync: Import failed — ${(err as Error).message}`);
+      throw err;
+    }
+  }
+
+  // ─── Frontmatter helper ───────────────────────────────────────────────────
+
+  private async updateFrontmatter(
+    file: TFile,
+    meta: Partial<SyncMeta>,
+  ): Promise<void> {
+    await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+      if (meta.gdocsId !== undefined) fm['gdocs-id'] = meta.gdocsId;
+      if (meta.gdocsUrl !== undefined) fm['gdocs-url'] = meta.gdocsUrl;
+      if (meta.lastSyncAt !== undefined) fm['gdocs-last-sync'] = meta.lastSyncAt;
+      if (meta.lastSyncHash !== undefined) fm['gdocs-hash'] = meta.lastSyncHash;
+    });
+  }
+}

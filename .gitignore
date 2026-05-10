@@ -1,0 +1,5 @@
+node_modules/
+main.js
+*.js.map
+# Obsidian plugin data — contains auth tokens and user settings
+data.json

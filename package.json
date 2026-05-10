@@ -1,0 +1,22 @@
+{
+  "name": "obsidian-gdocs-sync",
+  "version": "0.1.0",
+  "description": "Bi-directional sync between Obsidian notes and Google Docs",
+  "main": "main.js",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [],
+  "author": "Rick Bowman",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "builtin-modules": "^3.3.0",
+    "esbuild": "0.21.5",
+    "obsidian": "latest",
+    "tslib": "2.6.2",
+    "typescript": "5.5.3"
+  }
+}
