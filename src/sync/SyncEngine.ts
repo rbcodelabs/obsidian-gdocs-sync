@@ -24,13 +24,13 @@ async function sha256(text: string): Promise<string> {
 }
 
 // Strip YAML frontmatter (--- ... ---) from note content before syncing
-function stripFrontmatter(content: string): string {
+export function stripFrontmatter(content: string): string {
   const match = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
   return match ? match[1].trimStart() : content;
 }
 
 // Parse a Google Docs URL or raw document ID into a document ID
-function parseDocId(urlOrId: string): string {
+export function parseDocId(urlOrId: string): string {
   const urlMatch = urlOrId.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
   return urlMatch ? urlMatch[1] : urlOrId.trim();
 }
