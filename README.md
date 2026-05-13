@@ -4,6 +4,16 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 
 **Companion repo:** [`rbcodelabs/obsidian-gdocs-auth`](https://github.com/rbcodelabs/obsidian-gdocs-auth) — the Vercel-hosted OAuth proxy that keeps your Google `client_secret` off the client.
 
+## Documentation
+
+**[→ Full user docs on the Wiki](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki)**
+
+- [Installation & setup](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki/Installation)
+- [Syncing notes](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki/Syncing-Notes)
+- [Importing Google Docs](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki/Importing-Google-Docs)
+- [Settings reference](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki/Settings-Reference)
+- [Troubleshooting](https://github.com/rbcodelabs/obsidian-gdocs-sync/wiki/Troubleshooting)
+
 ---
 
 ## Features
