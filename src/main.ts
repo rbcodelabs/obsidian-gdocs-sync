@@ -6,6 +6,7 @@ import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { SyncEngine } from './sync/SyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
 import { ImportModal } from './ui/ImportModal';
+import { FolderImportModal } from './ui/FolderImportModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 
 export default class GDocsPlugin extends Plugin {
@@ -90,6 +91,20 @@ export default class GDocsPlugin extends Plugin {
             this.statusBar.setError('import failed');
           }
         }).open();
+      },
+    });
+
+    // Open the Drive folder import modal
+    this.addCommand({
+      id: 'import-drive-folder',
+      name: 'Import Google Drive folder',
+      callback: () => {
+        new FolderImportModal(
+          this.app,
+          this.api,
+          this.syncEngine,
+          () => this.settingsTab?.display(),
+        ).open();
       },
     });
 

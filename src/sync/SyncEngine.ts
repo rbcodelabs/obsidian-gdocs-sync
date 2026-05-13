@@ -1,9 +1,10 @@
 import { Plugin, TFile, Notice } from 'obsidian';
-import { GDocsPluginSettings, SyncMeta } from '../types';
+import { GDocsPluginSettings, FolderMapping, SyncMeta } from '../types';
 import { GoogleDocsAPI } from '../api/GoogleDocsAPI';
 import { TokenStore } from '../auth/TokenStore';
 import { GDocsPoller } from './GDocsPoller';
 import { FileWatcher } from './FileWatcher';
+import { FolderPoller } from './FolderPoller';
 import { ConflictResolver } from './ConflictResolver';
 import { gdocsToMarkdown } from '../converter/GDocsToMarkdown';
 import { markdownToGDocsRequests } from '../converter/MarkdownToGDocs';
@@ -36,6 +37,7 @@ function parseDocId(urlOrId: string): string {
 
 export class SyncEngine {
   private poller: GDocsPoller;
+  private folderPoller: FolderPoller;
   private fileWatcher: FileWatcher;
   private conflictResolver: ConflictResolver;
 
@@ -63,6 +65,11 @@ export class SyncEngine {
         await this.syncLocalToRemote(file);
       }
     });
+
+    this.folderPoller = new FolderPoller(
+      () => this.plugin.settings.folderMappings,
+      (folderId, obsidianFolder) => this.importGoogleDriveFolder(folderId, obsidianFolder),
+    );
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────
@@ -73,10 +80,12 @@ export class SyncEngine {
 
     this.fileWatcher.start();
     this.poller.start(this.syncedDocs);
+    this.folderPoller.start();
   }
 
   stop(): void {
     this.poller.stop();
+    this.folderPoller.stop();
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -125,9 +134,15 @@ export class SyncEngine {
     const tagList = Array.isArray(tags) ? tags : [tags];
     if (syncTag && tagList.includes(syncTag)) return true;
 
-    // Check folder membership
+    // Check folder membership (manual syncFolders list)
     for (const folder of syncFolders) {
       if (file.path.startsWith(folder.replace(/\/$/, '') + '/')) return true;
+    }
+
+    // Check Drive folder mappings
+    const { folderMappings } = this.plugin.settings;
+    for (const mapping of folderMappings) {
+      if (file.path.startsWith(mapping.obsidianFolder.replace(/\/$/, '') + '/')) return true;
     }
 
     return false;
@@ -339,6 +354,104 @@ export class SyncEngine {
       new Notice(`⚠ GDocs Sync: Import failed — ${(err as Error).message}`);
       throw err;
     }
+  }
+
+  /**
+   * Import all Google Docs from a Drive folder into an Obsidian vault folder.
+   * - Creates the vault folder if it doesn't exist.
+   * - Skips any doc that is already linked (has a matching gdocs-id frontmatter).
+   * - Saves a FolderMapping to settings so the folder stays in sync going forward.
+   *
+   * Returns the count of imported and skipped docs, and the Drive folder name.
+   */
+  async importGoogleDriveFolder(
+    folderId: string,
+    obsidianFolder: string,
+  ): Promise<{ imported: number; skipped: number; folderName: string }> {
+    // Fetch folder metadata and doc list from Drive
+    const [folderName, docs] = await Promise.all([
+      this.api.getFolderName(folderId),
+      this.api.listDocsInFolder(folderId),
+    ]);
+
+    if (docs.length === 0) {
+      return { imported: 0, skipped: 0, folderName };
+    }
+
+    // Ensure the vault folder exists
+    const folderExists = this.plugin.app.vault.getFolderByPath(obsidianFolder);
+    if (!folderExists) {
+      await this.plugin.app.vault.createFolder(obsidianFolder);
+    }
+
+    // Build a set of already-synced doc IDs to detect duplicates
+    const existingDocIds = new Set<string>();
+    for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      const cache = this.plugin.app.metadataCache.getFileCache(file);
+      const id: string | undefined = cache?.frontmatter?.['gdocs-id'];
+      if (id) existingDocIds.add(id);
+    }
+
+    let imported = 0;
+    let skipped = 0;
+
+    for (const driveFile of docs) {
+      if (existingDocIds.has(driveFile.id)) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        const doc = await this.api.getDocument(driveFile.id);
+        const markdown = gdocsToMarkdown(doc);
+        const hash = await sha256(markdown);
+        const docUrl = `https://docs.google.com/document/d/${driveFile.id}/edit`;
+
+        const frontmatter = [
+          '---',
+          `gdocs-id: ${driveFile.id}`,
+          `gdocs-url: "${docUrl}"`,
+          `gdocs-last-sync: ${new Date().toISOString()}`,
+          `gdocs-hash: ${hash}`,
+          '---',
+          '',
+        ].join('\n');
+
+        // Mirror the Drive subfolder structure inside the Obsidian folder.
+        // driveFile.relativePath is e.g. "Taxes/2024 Return" for a nested doc.
+        const safeRelativePath = driveFile.relativePath
+          .replace(/[\\:*?"<>|]/g, '-')
+          .trim();
+        const notePath = `${obsidianFolder}/${safeRelativePath}.md`;
+
+        // Ensure any intermediate subfolders exist
+        const noteFolder = notePath.substring(0, notePath.lastIndexOf('/'));
+        if (!this.plugin.app.vault.getFolderByPath(noteFolder)) {
+          await this.plugin.app.vault.createFolder(noteFolder);
+        }
+
+        await this.plugin.app.vault.create(notePath, frontmatter + markdown);
+
+        // Register for polling
+        const revision = await this.api.getDocumentRevision(driveFile.id);
+        this.syncedDocs.set(driveFile.id, revision);
+
+        imported++;
+      } catch (err) {
+        console.error(`[SyncEngine] Failed to import doc ${driveFile.id}:`, err);
+        new Notice(`⚠ GDocs Sync: Could not import "${driveFile.name}"`);
+      }
+    }
+
+    // Save the folder mapping so future notes in this folder auto-sync
+    const { folderMappings } = this.plugin.settings;
+    const alreadyMapped = folderMappings.some((m: FolderMapping) => m.driveFolderId === folderId);
+    if (!alreadyMapped) {
+      folderMappings.push({ driveFolderId: folderId, driveFolderName: folderName, obsidianFolder });
+      await this.plugin.saveSettings();
+    }
+
+    return { imported, skipped, folderName };
   }
 
   // ─── Frontmatter helper ───────────────────────────────────────────────────

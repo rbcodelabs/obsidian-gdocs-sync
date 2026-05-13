@@ -53,9 +53,26 @@ export type GoogleDocument = {
   lists?: Record<string, DocumentList>;
 };
 
+// ─── Drive API types ─────────────────────────────────────────────────────────
+
+export type DriveFile = {
+  id: string;
+  name: string;
+  modifiedTime: string;
+  relativePath: string; // vault-relative path within the import root, e.g. "Taxes/2024.md"
+};
+
+type DriveItem = {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+};
+
 // ─── API client ──────────────────────────────────────────────────────────────
 
 const DOCS_BASE = 'https://docs.googleapis.com/v1/documents';
+const DRIVE_BASE = 'https://www.googleapis.com/drive/v3';
 
 export class GoogleDocsAPI {
   constructor(private tokenStore: TokenStore) {}
@@ -138,6 +155,65 @@ export class GoogleDocsAPI {
       `${DOCS_BASE}/${docId}?fields=revisionId`,
     );
     return data.revisionId;
+  }
+
+  /**
+   * Extract a Drive folder ID from a folder URL or return the raw ID as-is.
+   * Handles both:
+   *   https://drive.google.com/drive/folders/<id>
+   *   https://drive.google.com/drive/u/0/folders/<id>
+   */
+  static parseFolderId(urlOrId: string): string {
+    const match = urlOrId.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+    return match ? match[1] : urlOrId.trim();
+  }
+
+  /**
+   * Fetch the name of a Drive folder by its ID.
+   * Requires drive.readonly scope.
+   */
+  async getFolderName(folderId: string): Promise<string> {
+    const data = await this.request<{ name: string }>(
+      `${DRIVE_BASE}/files/${folderId}?fields=name`,
+    );
+    return data.name;
+  }
+
+  /**
+   * Recursively list all Google Docs inside a Drive folder and its subfolders.
+   * Returns a flat array where each entry includes a relativePath mirroring the
+   * Drive subfolder structure, e.g. "Taxes/2024 Return" for a doc two levels deep.
+   * Requires drive.metadata.readonly scope.
+   */
+  async listDocsInFolder(folderId: string, pathPrefix = ''): Promise<DriveFile[]> {
+    const query = encodeURIComponent(
+      `'${folderId}' in parents and trashed=false`,
+    );
+    const fields = 'files(id,name,mimeType,modifiedTime)';
+    const url = `${DRIVE_BASE}/files?q=${query}&fields=${fields}&orderBy=name&pageSize=200`;
+
+    const data = await this.request<{ files: DriveItem[] }>(url);
+    const items = data.files ?? [];
+
+    const docs: DriveFile[] = [];
+
+    for (const item of items) {
+      if (item.mimeType === 'application/vnd.google-apps.document') {
+        docs.push({
+          id: item.id,
+          name: item.name,
+          modifiedTime: item.modifiedTime,
+          relativePath: pathPrefix ? `${pathPrefix}/${item.name}` : item.name,
+        });
+      } else if (item.mimeType === 'application/vnd.google-apps.folder') {
+        // Recurse into subfolders, building up the relative path
+        const subPath = pathPrefix ? `${pathPrefix}/${item.name}` : item.name;
+        const subDocs = await this.listDocsInFolder(item.id, subPath);
+        docs.push(...subDocs);
+      }
+    }
+
+    return docs;
   }
 
   /**

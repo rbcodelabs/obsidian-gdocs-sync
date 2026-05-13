@@ -23,6 +23,8 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Tag-based sync** — add the `gdocs-sync` tag to any note
 - **Folder-based sync** — configure folders that auto-sync all notes inside
 - **Import by URL** — pull an existing Google Doc into Obsidian via the command palette
+- **Drive folder import** — paste a Google Drive folder URL to import all Docs inside it (including subfolders) as notes, with the folder structure mirrored in your vault
+- **Automatic new-doc detection** — mapped Drive folders are polled every 5 minutes; new Docs added by anyone are imported automatically
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
 
@@ -140,10 +142,12 @@ src/
     SyncEngine.ts           Core orchestrator — queue deduplication, frontmatter updates
     FileWatcher.ts          vault.on('modify') + 2s debounce → SyncEngine
     GDocsPoller.ts          setInterval revision check → SyncEngine
+    FolderPoller.ts         Every 5min — checks mapped Drive folders for new docs
     ConflictResolver.ts     Last-write-wins (v1)
   ui/
     StatusBar.ts            ⇅ GDocs status bar item
     ImportModal.ts          Import a Google Doc by URL or ID
+    FolderImportModal.ts    Import an entire Drive folder by URL
 ```
 
 ### Auth flow
@@ -169,6 +173,11 @@ FILE MODIFY (Obsidian)
 POLL TICK (every 30s)
   → GET /v1/documents/{id}?fields=revisionId  (cheap revision check)
   → if revision changed: fetch full doc → gdocsToMarkdown → write file
+
+FOLDER POLL TICK (every 5 min)
+  → for each folderMapping: Drive API list all docs recursively
+  → for each doc not yet in vault: import as note, mirror subfolder structure
+  → register new notes in syncedDocs for per-doc polling
 ```
 
 ### Frontmatter written by plugin

@@ -6,14 +6,19 @@ import {
   ButtonComponent,
   TextComponent,
 } from 'obsidian';
-import { GDocsPluginSettings } from './types';
+import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
+import { GoogleDocsAPI } from './api/GoogleDocsAPI';
+import { SyncEngine } from './sync/SyncEngine';
+import { FolderImportModal } from './ui/FolderImportModal';
 
 // Expose the additional fields we need beyond the base Plugin type
 export interface GDocsPluginInterface extends Plugin {
   settings: GDocsPluginSettings;
   saveSettings(): Promise<void>;
   auth: GoogleAuth;
+  api: GoogleDocsAPI;
+  syncEngine: SyncEngine;
 }
 
 export class GDocsSettingTab extends PluginSettingTab {
@@ -116,7 +121,34 @@ export class GDocsSettingTab extends PluginSettingTab {
         });
     });
 
-    // ── Section 3: Sync Behaviour ───────────────────────────────────────────
+    // ── Section 3: Drive Folder Mappings ───────────────────────────────────
+    containerEl.createEl('h2', { text: 'Drive Folder Sync' });
+    containerEl.createEl('p', {
+      text: 'Import an entire Google Drive folder. All Docs in the folder become synced notes in the vault folder you choose.',
+      cls: 'setting-item-description',
+    });
+
+    const mappingListEl = containerEl.createDiv('gdocs-folder-mapping-list');
+    this.renderFolderMappings(mappingListEl);
+
+    new Setting(containerEl).addButton((btn: ButtonComponent) => {
+      btn
+        .setButtonText('+ Add Drive Folder')
+        .setCta()
+        .onClick(() => {
+          new FolderImportModal(
+            this.app,
+            this.pluginInstance.api,
+            this.pluginInstance.syncEngine,
+            () => {
+              mappingListEl.empty();
+              this.renderFolderMappings(mappingListEl);
+            },
+          ).open();
+        });
+    });
+
+    // ── Section 4: Sync Behaviour ───────────────────────────────────────────
     containerEl.createEl('h2', { text: 'Sync Behavior' });
 
     new Setting(containerEl)
@@ -148,6 +180,37 @@ export class GDocsSettingTab extends PluginSettingTab {
             await this.pluginInstance.saveSettings();
           });
       });
+  }
+
+  private renderFolderMappings(container: HTMLElement): void {
+    const mappings: FolderMapping[] = this.pluginInstance.settings.folderMappings;
+
+    if (mappings.length === 0) {
+      container.createEl('p', {
+        text: 'No Drive folders connected yet.',
+        cls: 'setting-item-description',
+      });
+      return;
+    }
+
+    mappings.forEach((mapping, index) => {
+      const setting = new Setting(container)
+        .setName(`📁 ${mapping.driveFolderName}`)
+        .setDesc(`→ ${mapping.obsidianFolder}`)
+        .addButton((btn: ButtonComponent) => {
+          btn
+            .setButtonText('Remove')
+            .setWarning()
+            .onClick(async () => {
+              this.pluginInstance.settings.folderMappings.splice(index, 1);
+              await this.pluginInstance.saveSettings();
+              container.empty();
+              this.renderFolderMappings(container);
+            });
+        });
+
+      setting.settingEl.style.borderTop = 'none';
+    });
   }
 
   private renderFolderList(container: HTMLElement): void {

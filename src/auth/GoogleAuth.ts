@@ -102,7 +102,11 @@ export class GoogleAuth {
 
     const authUrl = `${this.plugin.settings.authProxyUrl}/api/auth/start?state=${encodeURIComponent(this.pendingState)}`;
     console.log('[GDocsAuth] Opening auth URL:', authUrl);
-    window.open(authUrl);
+    // Use Electron's shell.openExternal so the URL opens in the user's default
+    // browser with their normal profile — window.open() hands off to Chrome
+    // without profile context, which causes it to open incognito.
+    const { shell } = window.require('electron');
+    shell.openExternal(authUrl);
 
     new Notice('Opening Google sign-in... Return here after authorizing.');
   }
