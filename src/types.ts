@@ -22,6 +22,13 @@ export interface FolderMapping {
   obsidianFolder: string;   // Vault-relative path, e.g. "Finances & Estate"
 }
 
+export interface DriveItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  modifiedTime: string;
+}
+
 export interface GDocsPluginSettings {
   authProxyUrl: string;       // e.g. https://gdocs-sync.vercel.app
   syncTag: string;            // e.g. "gdocs-sync"

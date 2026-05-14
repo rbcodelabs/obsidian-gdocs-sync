@@ -1,4 +1,5 @@
 import { TokenStore } from '../auth/TokenStore';
+import { DriveItem } from '../types';
 
 // ─── Google Docs / Drive type definitions ────────────────────────────────────
 
@@ -62,12 +63,6 @@ export type DriveFile = {
   relativePath: string; // vault-relative path within the import root, e.g. "Taxes/2024.md"
 };
 
-type DriveItem = {
-  id: string;
-  name: string;
-  mimeType: string;
-  modifiedTime: string;
-};
 
 // ─── API client ──────────────────────────────────────────────────────────────
 
@@ -177,6 +172,24 @@ export class GoogleDocsAPI {
       `${DRIVE_BASE}/files/${folderId}?fields=name`,
     );
     return data.name;
+  }
+
+  /**
+   * List the immediate children (folders and docs) of a Drive folder.
+   * Used by the Drive browser modal to support point-and-click folder navigation.
+   * Folders are listed before docs, then both sorted alphabetically (orderBy=folder,name).
+   * pageSize=200 matches existing methods; pagination (nextPageToken) is a future enhancement.
+   */
+  async listFolderContents(folderId: string): Promise<DriveItem[]> {
+    const q = encodeURIComponent(
+      `'${folderId}' in parents and trashed=false and (mimeType='application/vnd.google-apps.folder' or mimeType='application/vnd.google-apps.document')`,
+    );
+    const fields = 'files(id,name,mimeType,modifiedTime)';
+    // orderBy=folder,name sorts folders before docs, then alphabetically
+    // pageSize=200 matches existing methods; pagination (nextPageToken) is a future enhancement
+    const url = `${DRIVE_BASE}/files?q=${q}&fields=${fields}&orderBy=folder,name&pageSize=200`;
+    const data = await this.request<{ files: DriveItem[] }>(url);
+    return data.files ?? [];
   }
 
   /**

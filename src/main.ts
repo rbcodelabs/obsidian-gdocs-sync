@@ -5,8 +5,8 @@ import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { SyncEngine } from './sync/SyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
-import { ImportModal } from './ui/ImportModal';
 import { FolderImportModal } from './ui/FolderImportModal';
+import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 
 export default class GDocsPlugin extends Plugin {
@@ -77,20 +77,26 @@ export default class GDocsPlugin extends Plugin {
       },
     });
 
-    // Open the import modal
+    // Open the Drive browser modal for importing a single doc
     this.addCommand({
       id: 'import-google-doc',
       name: 'Import Google Doc',
       callback: () => {
-        new ImportModal(this.app, async (urlOrId) => {
-          this.statusBar.setSyncing('import');
-          try {
-            await this.syncEngine.importGoogleDoc(urlOrId);
-            this.statusBar.setSynced();
-          } catch {
-            this.statusBar.setError('import failed');
-          }
-        }).open();
+        new DriveBrowserModal(
+          this.app,
+          this,
+          'doc',
+          async (item, _breadcrumbs, _vaultDest) => {
+            this.statusBar.setSyncing('import');
+            try {
+              await this.syncEngine.importGoogleDoc(item.id);
+              this.statusBar.setSynced();
+            } catch (err) {
+              this.statusBar.setError('import failed');
+              throw err; // let modal show the notice
+            }
+          },
+        ).open();
       },
     });
 

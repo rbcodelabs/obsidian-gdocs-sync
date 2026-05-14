@@ -10,7 +10,7 @@ import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { SyncEngine } from './sync/SyncEngine';
-import { FolderImportModal } from './ui/FolderImportModal';
+import { DriveBrowserModal } from './ui/DriveBrowserModal';
 
 // Expose the additional fields we need beyond the base Plugin type
 export interface GDocsPluginInterface extends Plugin {
@@ -136,11 +136,13 @@ export class GDocsSettingTab extends PluginSettingTab {
         .setButtonText('+ Add Drive Folder')
         .setCta()
         .onClick(() => {
-          new FolderImportModal(
+          new DriveBrowserModal(
             this.app,
-            this.pluginInstance.api,
-            this.pluginInstance.syncEngine,
-            () => {
+            this.pluginInstance as unknown as import('./main').default,
+            'folder',
+            async (item, _breadcrumbs, vaultDest) => {
+              await this.pluginInstance.syncEngine.importGoogleDriveFolder(item.id, vaultDest);
+              // importGoogleDriveFolder already saves the FolderMapping to settings
               mappingListEl.empty();
               this.renderFolderMappings(mappingListEl);
             },
