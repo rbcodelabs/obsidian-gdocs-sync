@@ -52,7 +52,7 @@ export class TokenStore {
     const response = await fetch(refreshUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refreshToken: tokens.refreshToken }),
+      body: JSON.stringify({ refresh_token: tokens.refreshToken }),
     });
 
     if (!response.ok) {
