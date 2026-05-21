@@ -212,13 +212,16 @@ export class SyncEngine {
 
   /**
    * Pull a Google Doc's current content and write it to the matching local note.
-   * Skips the write if the conflict resolver determines local wins.
+   * Pass forceRemote=true to skip conflict detection (e.g. explicit "Pull" command).
+   * Otherwise uses hash-based conflict detection: if local content hasn't changed
+   * since the last sync (hashes match), remote wins automatically. If both sides
+   * changed, local wins to avoid silently overwriting the user's edits.
    */
-  async syncRemoteToLocal(docId: string): Promise<void> {
+  async syncRemoteToLocal(docId: string, forceRemote = false): Promise<void> {
     const existing = this.syncQueue.get(docId);
     if (existing) return existing;
 
-    const task = this._syncRemoteToLocal(docId);
+    const task = this._syncRemoteToLocal(docId, forceRemote);
     this.syncQueue.set(docId, task);
     try {
       await task;
@@ -227,7 +230,7 @@ export class SyncEngine {
     }
   }
 
-  private async _syncRemoteToLocal(docId: string): Promise<void> {
+  private async _syncRemoteToLocal(docId: string, forceRemote = false): Promise<void> {
     // Find the local file that owns this docId
     const files = this.plugin.app.vault.getMarkdownFiles();
     const file = files.find((f) => {
@@ -244,22 +247,27 @@ export class SyncEngine {
       const doc = await this.api.getDocument(docId);
       const remoteMarkdown = gdocsToMarkdown(doc);
 
-      // Conflict resolution: compare mod times
-      const localStat = file.stat;
-      const localModified = new Date(localStat.mtime);
-      const meta = this.plugin.app.metadataCache.getFileCache(file);
-      const lastSyncAt: string | undefined = meta?.frontmatter?.['gdocs-last-sync'];
-      // Use the lastSyncAt as proxy for remote's "last written" time if available
-      const remoteModified = lastSyncAt ? new Date(lastSyncAt) : new Date(0);
+      if (!forceRemote) {
+        // Hash-based conflict detection: check whether local content has changed
+        // since the last sync. Timestamp comparison is unreliable because
+        // updateFrontmatter touches the file on every push, keeping mtime fresh.
+        const rawContent = await this.plugin.app.vault.read(file);
+        const localBodyContent = stripFrontmatter(rawContent);
+        const localHash = await sha256(localBodyContent);
+        const meta = this.plugin.app.metadataCache.getFileCache(file);
+        const lastSyncHash: string | undefined = meta?.frontmatter?.['gdocs-hash'];
 
-      const winner = this.conflictResolver.resolve(localModified, remoteModified);
-      if (winner === 'local') {
-        // Local wins — push local content to remote instead
-        await this.syncLocalToRemote(file);
-        return;
+        if (lastSyncHash && localHash !== lastSyncHash) {
+          // Local was edited since the last sync — treat local as authoritative
+          // to avoid silently clobbering the user's work. Push local to remote.
+          console.log(`[SyncEngine] Conflict on ${file.path}: local edited since last sync. Local wins.`);
+          await this.syncLocalToRemote(file);
+          return;
+        }
+        // If hashes match (or no prior hash), local is unchanged — remote wins.
       }
 
-      // Remote wins — overwrite local content (preserving frontmatter)
+      // Remote wins — overwrite local body content, preserving frontmatter
       const rawContent = await this.plugin.app.vault.read(file);
       const frontmatterMatch = rawContent.match(/^(---\n[\s\S]*?\n---\n?)/);
       const existingFrontmatter = frontmatterMatch ? frontmatterMatch[1] : '';

@@ -77,6 +77,36 @@ export default class GDocsPlugin extends Plugin {
       },
     });
 
+    // Pull the currently active note FROM Google Docs (remote wins, no conflict check)
+    this.addCommand({
+      id: 'pull-current-note',
+      name: 'Pull current note from Google Docs',
+      callback: async () => {
+        const activeFile = this.app.workspace.getActiveFile();
+        if (!activeFile) {
+          new Notice('No active note to pull.');
+          return;
+        }
+
+        const meta = this.app.metadataCache.getFileCache(activeFile);
+        const docId: string | undefined = meta?.frontmatter?.['gdocs-id'];
+        if (!docId) {
+          new Notice('This note is not linked to a Google Doc.');
+          return;
+        }
+
+        this.statusBar.setSyncing(activeFile.basename);
+        try {
+          await this.syncEngine.syncRemoteToLocal(docId, true /* forceRemote */);
+          this.statusBar.setSynced();
+          new Notice(`✓ Pulled latest "${activeFile.basename}" from Google Docs`);
+        } catch (err) {
+          this.statusBar.setError('pull failed');
+          new Notice(`⚠ Pull failed: ${(err as Error).message}`);
+        }
+      },
+    });
+
     // Open the Drive browser modal for importing a single doc
     this.addCommand({
       id: 'import-google-doc',

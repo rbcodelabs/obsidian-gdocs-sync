@@ -183,8 +183,9 @@ function insertLineWithStyles(
  *
  * Supported:
  *   Headings H1–H6, bold, italic, bold+italic, strikethrough, inline code,
- *   links, unordered lists, ordered lists, fenced code blocks (``` / ~~~),
- *   horizontal rules (---, ***, ___), blank line separators.
+ *   links, unordered lists, ordered lists, task lists (- [ ] / - [x]),
+ *   fenced code blocks (``` / ~~~), horizontal rules (---, ***, ___),
+ *   blank line separators.
  */
 export function markdownToGDocsRequests(markdown: string): object[] {
   const requests: object[] = [];
@@ -250,6 +251,33 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       const lineStart = index;
       const advance = insertLineWithStyles(orderedMatch[1], index, requests);
       requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, true));
+      index += advance;
+      continue;
+    }
+
+    // ── Task list item (- [ ] unchecked or - [x] checked) ────────────────────
+    const taskMatch = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)/);
+    if (taskMatch) {
+      const checked = taskMatch[1].toLowerCase() === 'x';
+      const lineStart = index;
+      const advance = insertLineWithStyles(taskMatch[2], index, requests);
+      // Use Google Docs native checkbox bullets
+      requests.push({
+        createParagraphBullets: {
+          range: { startIndex: lineStart, endIndex: lineStart + advance },
+          bulletPreset: 'BULLET_CHECKBOX',
+        },
+      });
+      // Strike through the text for already-checked items
+      if (checked && taskMatch[2].length > 0) {
+        requests.push({
+          updateTextStyle: {
+            range: { startIndex: lineStart, endIndex: lineStart + taskMatch[2].length },
+            textStyle: { strikethrough: true },
+            fields: 'strikethrough',
+          },
+        });
+      }
       index += advance;
       continue;
     }
