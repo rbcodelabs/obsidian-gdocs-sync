@@ -293,7 +293,9 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       index += tabCount;
       const advance = insertLineWithStyles(orderedMatch[2], index, requests);
       requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, true));
-      index = lineStart + tabCount + advance;
+      // createParagraphBullets consumes the leading tab characters it uses for
+      // nesting — the net document growth is advance, not tabCount + advance.
+      index = lineStart + advance;
       continue;
     }
 
@@ -306,7 +308,6 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       const lineStart = index;
       const tabCount = insertNestingTabs(nestingLevel, index, requests);
       index += tabCount;
-      const contentStart = index;
       const advance = insertLineWithStyles(content, index, requests);
       // Use Google Docs native checkbox bullets
       requests.push({
@@ -315,17 +316,20 @@ export function markdownToGDocsRequests(markdown: string): object[] {
           bulletPreset: 'BULLET_CHECKBOX',
         },
       });
-      // Strike through the text for already-checked items
+      // Strike through the text for already-checked items.
+      // createParagraphBullets has consumed the tabs by this point in the batch,
+      // so content starts at lineStart (not lineStart + tabCount).
       if (checked && content.length > 0) {
         requests.push({
           updateTextStyle: {
-            range: { startIndex: contentStart, endIndex: contentStart + content.length },
+            range: { startIndex: lineStart, endIndex: lineStart + content.length },
             textStyle: { strikethrough: true },
             fields: 'strikethrough',
           },
         });
       }
-      index = lineStart + tabCount + advance;
+      // Net document growth is advance only — tabs consumed by createParagraphBullets.
+      index = lineStart + advance;
       continue;
     }
 
@@ -338,7 +342,8 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       index += tabCount;
       const advance = insertLineWithStyles(unorderedMatch[2], index, requests);
       requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, false));
-      index = lineStart + tabCount + advance;
+      // Net document growth is advance only — tabs consumed by createParagraphBullets.
+      index = lineStart + advance;
       continue;
     }
 
