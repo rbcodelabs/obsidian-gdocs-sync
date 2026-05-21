@@ -128,6 +128,64 @@ describe('markdownToGDocsRequests', () => {
     });
   });
 
+  describe('task lists', () => {
+    it('uses BULLET_CHECKBOX preset for - [ ] items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Pack tent');
+      expect(reqs.some((r: any) => r.createParagraphBullets?.bulletPreset === 'BULLET_CHECKBOX')).toBe(true);
+    });
+
+    it('does not apply strikethrough for unchecked items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Pack tent');
+      expect(hasStyle(reqs, 'strikethrough')).toBe(false);
+    });
+
+    it('applies strikethrough for - [x] items', () => {
+      const reqs = markdownToGDocsRequests('- [x] Done thing');
+      expect(hasStyle(reqs, 'strikethrough')).toBe(true);
+    });
+
+    it('does not include [ ] or [x] in the inserted text', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Item\n- [x] Done');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t.includes('['))).toBe(false);
+    });
+
+    it('inserts a tab for a single-level indented task item', () => {
+      const reqs = markdownToGDocsRequests('\t- [ ] Sub item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('inserts two tabs for a double-indented task item', () => {
+      const reqs = markdownToGDocsRequests('\t\t- [ ] Deep item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t\t')).toBe(true);
+    });
+
+    it('inserts a tab for a 2-space indented task item', () => {
+      const reqs = markdownToGDocsRequests('  - [ ] Sub item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('does not insert a tab for top-level task items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Top level');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(false);
+    });
+
+    it('handles a hierarchical checklist end-to-end', () => {
+      const md = '- [ ] general\n\t- [ ] tool kit\n\t- [x] trash bags';
+      const reqs = markdownToGDocsRequests(md);
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t.includes('general'))).toBe(true);
+      expect(texts.some(t => t.includes('tool kit'))).toBe(true);
+      expect(texts.some(t => t.includes('trash bags'))).toBe(true);
+      expect(texts.some(t => t === '\t')).toBe(true); // nesting tabs present
+      expect(hasStyle(reqs, 'strikethrough')).toBe(true); // trash bags is checked
+    });
+  });
+
   describe('horizontal rules', () => {
     it('converts --- to a line of em-dashes', () => {
       const reqs = markdownToGDocsRequests('---');

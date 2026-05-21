@@ -1,6 +1,6 @@
 // TODO: v2 — replace this line-by-line parser with a remark/unified AST pipeline.
-// Current limitations: no tables, no nested list nesting levels, no reference-
-// style links, no blockquotes, no multi-paragraph list items.
+// Current limitations: no tables, no reference-style links, no blockquotes,
+// no multi-paragraph list items.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -134,6 +134,45 @@ function createParagraphBulletsRequest(
   };
 }
 
+// ─── List nesting helpers ─────────────────────────────────────────────────────
+
+/**
+ * Convert Markdown list indentation to a Google Docs nesting level.
+ * 1 tab = 1 level; 2 spaces = 1 level (standard Markdown convention).
+ */
+function indentToNestingLevel(indent: string): number {
+  let level = 0;
+  let i = 0;
+  while (i < indent.length) {
+    if (indent[i] === '\t') {
+      level++;
+      i++;
+    } else {
+      let spaces = 0;
+      while (i < indent.length && indent[i] === ' ') { spaces++; i++; }
+      level += Math.floor(spaces / 2);
+    }
+  }
+  return level;
+}
+
+/**
+ * Insert tab characters representing nesting level, advancing index.
+ * Google Docs uses leading \t characters in inserted text to determine
+ * nesting level when createParagraphBullets is applied.
+ * Returns the number of characters inserted (i.e. nestingLevel).
+ */
+function insertNestingTabs(
+  nestingLevel: number,
+  index: number,
+  requests: object[],
+): number {
+  if (nestingLevel <= 0) return 0;
+  const tabs = '\t'.repeat(nestingLevel);
+  requests.push({ insertText: { location: { index }, text: tabs } });
+  return nestingLevel;
+}
+
 // ─── Heading helpers ──────────────────────────────────────────────────────────
 
 const HEADING_STYLE: Record<number, string> = {
@@ -246,49 +285,60 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     }
 
     // ── Ordered list (1. 2. etc.) ─────────────────────────────────────────────
-    const orderedMatch = line.match(/^\s*\d+\.\s+(.*)/);
+    const orderedMatch = line.match(/^(\s*)\d+\.\s+(.*)/);
     if (orderedMatch) {
+      const nestingLevel = indentToNestingLevel(orderedMatch[1]);
       const lineStart = index;
-      const advance = insertLineWithStyles(orderedMatch[1], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, true));
-      index += advance;
+      const tabCount = insertNestingTabs(nestingLevel, index, requests);
+      index += tabCount;
+      const advance = insertLineWithStyles(orderedMatch[2], index, requests);
+      requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, true));
+      index = lineStart + tabCount + advance;
       continue;
     }
 
     // ── Task list item (- [ ] unchecked or - [x] checked) ────────────────────
-    const taskMatch = line.match(/^\s*[-*]\s+\[([ xX])\]\s+(.*)/);
+    const taskMatch = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.*)/);
     if (taskMatch) {
-      const checked = taskMatch[1].toLowerCase() === 'x';
+      const nestingLevel = indentToNestingLevel(taskMatch[1]);
+      const checked = taskMatch[2].toLowerCase() === 'x';
+      const content = taskMatch[3];
       const lineStart = index;
-      const advance = insertLineWithStyles(taskMatch[2], index, requests);
+      const tabCount = insertNestingTabs(nestingLevel, index, requests);
+      index += tabCount;
+      const contentStart = index;
+      const advance = insertLineWithStyles(content, index, requests);
       // Use Google Docs native checkbox bullets
       requests.push({
         createParagraphBullets: {
-          range: { startIndex: lineStart, endIndex: lineStart + advance },
+          range: { startIndex: lineStart, endIndex: lineStart + tabCount + advance },
           bulletPreset: 'BULLET_CHECKBOX',
         },
       });
       // Strike through the text for already-checked items
-      if (checked && taskMatch[2].length > 0) {
+      if (checked && content.length > 0) {
         requests.push({
           updateTextStyle: {
-            range: { startIndex: lineStart, endIndex: lineStart + taskMatch[2].length },
+            range: { startIndex: contentStart, endIndex: contentStart + content.length },
             textStyle: { strikethrough: true },
             fields: 'strikethrough',
           },
         });
       }
-      index += advance;
+      index = lineStart + tabCount + advance;
       continue;
     }
 
     // ── Unordered list (- or *) ───────────────────────────────────────────────
-    const unorderedMatch = line.match(/^\s*[*-]\s+(.*)/);
+    const unorderedMatch = line.match(/^(\s*)[*-]\s+(.*)/);
     if (unorderedMatch) {
+      const nestingLevel = indentToNestingLevel(unorderedMatch[1]);
       const lineStart = index;
-      const advance = insertLineWithStyles(unorderedMatch[1], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, false));
-      index += advance;
+      const tabCount = insertNestingTabs(nestingLevel, index, requests);
+      index += tabCount;
+      const advance = insertLineWithStyles(unorderedMatch[2], index, requests);
+      requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, false));
+      index = lineStart + tabCount + advance;
       continue;
     }
 
