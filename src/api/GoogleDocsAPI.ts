@@ -22,8 +22,9 @@ export type Paragraph = {
   elements: ParagraphElement[];
   paragraphStyle?: {
     namedStyleType?: string;
-    // Present on checkbox list items — 'CHECKED' | 'UNCHECKED'
-    checkboxState?: string;
+    // NOTE: the Google Docs REST API v1 does NOT expose checkbox checked state.
+    // checkboxState is not a valid API field (throws 400 on write, absent on read).
+    // The only signal is strikethrough on text runs — see isCheckboxChecked().
   };
   bullet?: { listId: string; nestingLevel?: number };
 };

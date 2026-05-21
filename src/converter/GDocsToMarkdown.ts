@@ -130,13 +130,14 @@ function isCheckboxList(
 
 /**
  * Returns true if a checkbox paragraph is checked.
- * Prefers the API's checkboxState field; falls back to detecting whether all
- * non-empty text runs carry strikethrough (which we apply on push for [x] items,
- * and which Google Docs applies when a user checks a box in the UI).
+ *
+ * The Google Docs REST API v1 does not expose checkbox checked state via any
+ * dedicated field — probing confirmed checkboxState is absent from all responses
+ * and throws a 400 if you try to write it. The only detectable signal is
+ * strikethrough on all non-empty text runs, which both our push (for [x] items)
+ * and the Google Docs UI apply when a box is checked.
  */
 function isCheckboxChecked(para: Paragraph): boolean {
-  const state = para.paragraphStyle?.checkboxState;
-  if (state) return state === 'CHECKED';
   const runs = (para.elements ?? []).filter(el => {
     const t = el.textRun?.content ?? '';
     return t !== '' && t !== '\n';
