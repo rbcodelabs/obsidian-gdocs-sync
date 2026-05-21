@@ -67,7 +67,7 @@ export default class GDocsPlugin extends Plugin {
 
         this.statusBar.setSyncing(activeFile.basename);
         try {
-          await this.syncEngine.syncLocalToRemote(activeFile);
+          await this.syncEngine.syncLocalToRemote(activeFile, true /* force */);
           this.statusBar.setSynced();
           new Notice(`✓ Synced "${activeFile.basename}" to Google Docs`);
         } catch (err) {

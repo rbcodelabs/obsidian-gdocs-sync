@@ -152,15 +152,18 @@ export class SyncEngine {
 
   /**
    * Push local note content to its linked Google Doc.
+   * Pass force=true (e.g. from the manual "Sync current note" command) to
+   * bypass the hash-skip optimization and always push. The skip is useful for
+   * auto-sync-on-save but wrong for an explicit user action.
    * Clears the document and re-inserts all content from scratch (safe for v1;
    * v2 could do diff-based updates to preserve comments and suggestions).
    */
-  async syncLocalToRemote(file: TFile): Promise<void> {
+  async syncLocalToRemote(file: TFile, force = false): Promise<void> {
     // Deduplicate concurrent syncs of the same file
     const existing = this.syncQueue.get(file.path);
     if (existing) return existing;
 
-    const task = this._syncLocalToRemote(file);
+    const task = this._syncLocalToRemote(file, force);
     this.syncQueue.set(file.path, task);
     try {
       await task;
@@ -169,7 +172,7 @@ export class SyncEngine {
     }
   }
 
-  private async _syncLocalToRemote(file: TFile): Promise<void> {
+  private async _syncLocalToRemote(file: TFile, force = false): Promise<void> {
     const meta = this.plugin.app.metadataCache.getFileCache(file);
     let docId: string | undefined = meta?.frontmatter?.['gdocs-id'];
 
@@ -182,9 +185,9 @@ export class SyncEngine {
     const bodyContent = stripFrontmatter(rawContent);
     const hash = await sha256(bodyContent);
 
-    // Skip if content hasn't changed since last sync
+    // Skip if content hasn't changed since last sync — but never skip a forced push
     const lastHash: string | undefined = meta?.frontmatter?.['gdocs-hash'];
-    if (lastHash && lastHash === hash) return;
+    if (!force && lastHash && lastHash === hash) return;
 
     try {
       await this.api.clearDocument(docId);
