@@ -157,20 +157,25 @@ function indentToNestingLevel(indent: string): number {
 }
 
 /**
- * Insert tab characters representing nesting level, advancing index.
- * Google Docs uses leading \t characters in inserted text to determine
- * nesting level when createParagraphBullets is applied.
- * Returns the number of characters inserted (i.e. nestingLevel).
+ * Return an updateParagraphStyle request that sets visual indentation for
+ * nested list items. Each nesting level adds 36 pt (0.5 in) of indentation.
+ * Returns null for top-level items (nestingLevel === 0).
  */
-function insertNestingTabs(
+function nestingIndentRequest(
   nestingLevel: number,
-  index: number,
-  requests: object[],
-): number {
-  if (nestingLevel <= 0) return 0;
-  const tabs = '\t'.repeat(nestingLevel);
-  requests.push({ insertText: { location: { index }, text: tabs } });
-  return nestingLevel;
+  startIndex: number,
+  endIndex: number,
+): object | null {
+  if (nestingLevel <= 0) return null;
+  return {
+    updateParagraphStyle: {
+      range: { startIndex, endIndex },
+      paragraphStyle: {
+        indentStart: { magnitude: 36 * nestingLevel, unit: 'PT' },
+      },
+      fields: 'indentStart',
+    },
+  };
 }
 
 // ─── Heading helpers ──────────────────────────────────────────────────────────
@@ -289,12 +294,10 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     if (orderedMatch) {
       const nestingLevel = indentToNestingLevel(orderedMatch[1]);
       const lineStart = index;
-      const tabCount = insertNestingTabs(nestingLevel, index, requests);
-      index += tabCount;
       const advance = insertLineWithStyles(orderedMatch[2], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, true));
-      // createParagraphBullets consumes the leading tab characters it uses for
-      // nesting — the net document growth is advance, not tabCount + advance.
+      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, true));
+      const ir = nestingIndentRequest(nestingLevel, lineStart, lineStart + advance);
+      if (ir) requests.push(ir);
       index = lineStart + advance;
       continue;
     }
@@ -306,19 +309,15 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       const checked = taskMatch[2].toLowerCase() === 'x';
       const content = taskMatch[3];
       const lineStart = index;
-      const tabCount = insertNestingTabs(nestingLevel, index, requests);
-      index += tabCount;
       const advance = insertLineWithStyles(content, index, requests);
-      // Use Google Docs native checkbox bullets
       requests.push({
         createParagraphBullets: {
-          range: { startIndex: lineStart, endIndex: lineStart + tabCount + advance },
+          range: { startIndex: lineStart, endIndex: lineStart + advance },
           bulletPreset: 'BULLET_CHECKBOX',
         },
       });
-      // Strike through the text for already-checked items.
-      // createParagraphBullets has consumed the tabs by this point in the batch,
-      // so content starts at lineStart (not lineStart + tabCount).
+      const ir = nestingIndentRequest(nestingLevel, lineStart, lineStart + advance);
+      if (ir) requests.push(ir);
       if (checked && content.length > 0) {
         requests.push({
           updateTextStyle: {
@@ -328,7 +327,6 @@ export function markdownToGDocsRequests(markdown: string): object[] {
           },
         });
       }
-      // Net document growth is advance only — tabs consumed by createParagraphBullets.
       index = lineStart + advance;
       continue;
     }
@@ -338,11 +336,10 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     if (unorderedMatch) {
       const nestingLevel = indentToNestingLevel(unorderedMatch[1]);
       const lineStart = index;
-      const tabCount = insertNestingTabs(nestingLevel, index, requests);
-      index += tabCount;
       const advance = insertLineWithStyles(unorderedMatch[2], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + tabCount + advance, false));
-      // Net document growth is advance only — tabs consumed by createParagraphBullets.
+      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, false));
+      const ir = nestingIndentRequest(nestingLevel, lineStart, lineStart + advance);
+      if (ir) requests.push(ir);
       index = lineStart + advance;
       continue;
     }
