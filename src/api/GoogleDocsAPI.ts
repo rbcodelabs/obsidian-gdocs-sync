@@ -20,7 +20,11 @@ export type ParagraphElement = {
 
 export type Paragraph = {
   elements: ParagraphElement[];
-  paragraphStyle?: { namedStyleType?: string };
+  paragraphStyle?: {
+    namedStyleType?: string;
+    // Present on checkbox list items — 'CHECKED' | 'UNCHECKED'
+    checkboxState?: string;
+  };
   bullet?: { listId: string; nestingLevel?: number };
 };
 

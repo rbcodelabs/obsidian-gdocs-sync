@@ -30,6 +30,31 @@ function listPara(
   };
 }
 
+function checkboxPara(
+  text: string,
+  listId: string,
+  checked: boolean,
+  useCheckboxState = false,
+): GoogleDocument['body']['content'][number] {
+  return {
+    paragraph: {
+      paragraphStyle: useCheckboxState
+        ? { checkboxState: checked ? 'CHECKED' : 'UNCHECKED' }
+        : undefined,
+      elements: [{
+        textRun: {
+          content: text + '\n',
+          textStyle: checked ? { strikethrough: true } : {},
+        },
+      }],
+      bullet: { listId, nestingLevel: 0 },
+    },
+  };
+}
+
+// Checkbox list definition: no glyphSymbol, no ordered glyphType
+const checkboxList = { listProperties: { nestingLevels: [{}] } };
+
 function monoPara(text: string): GoogleDocument['body']['content'][number] {
   return {
     paragraph: {
@@ -166,6 +191,59 @@ describe('gdocsToMarkdown', () => {
         { list1: { listProperties: { nestingLevels: [{ glyphType: 'DECIMAL' }] } } },
       ));
       expect(result).toBe('1. First\n1. Second');
+    });
+
+    it('renders unchecked task list items as - [ ]', () => {
+      const result = gdocsToMarkdown(doc(
+        [checkboxPara('Buy milk', 'cb1', false)],
+        { cb1: checkboxList },
+      ));
+      expect(result).toBe('- [ ] Buy milk');
+    });
+
+    it('renders checked task list items as - [x] via strikethrough', () => {
+      const result = gdocsToMarkdown(doc(
+        [checkboxPara('Done thing', 'cb1', true)],
+        { cb1: checkboxList },
+      ));
+      expect(result).toBe('- [x] Done thing');
+    });
+
+    it('renders checked task list items as - [x] via checkboxState', () => {
+      const result = gdocsToMarkdown(doc(
+        [checkboxPara('Done thing', 'cb1', true, true)],
+        { cb1: checkboxList },
+      ));
+      expect(result).toBe('- [x] Done thing');
+    });
+
+    it('does not emit ~~strikethrough~~ for checked items', () => {
+      const result = gdocsToMarkdown(doc(
+        [checkboxPara('Packed', 'cb1', true)],
+        { cb1: checkboxList },
+      ));
+      expect(result).not.toContain('~~');
+      expect(result).toBe('- [x] Packed');
+    });
+
+    it('renders a mixed checked/unchecked list', () => {
+      const result = gdocsToMarkdown(doc(
+        [
+          checkboxPara('tent', 'cb1', true),
+          checkboxPara('sleeping bag', 'cb1', false),
+          checkboxPara('lantern', 'cb1', true),
+        ],
+        { cb1: checkboxList },
+      ));
+      expect(result).toBe('- [x] tent\n- [ ] sleeping bag\n- [x] lantern');
+    });
+
+    it('does not treat checkbox lists as regular bullets', () => {
+      const result = gdocsToMarkdown(doc(
+        [checkboxPara('item', 'cb1', false)],
+        { cb1: checkboxList },
+      ));
+      expect(result).not.toMatch(/^- item/);
     });
 
     it('indents nested list items', () => {
