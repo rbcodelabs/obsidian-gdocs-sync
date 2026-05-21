@@ -44,13 +44,9 @@ function bulletRangeEnds(requests: object[]): number[] {
     .map((r: any) => r.createParagraphBullets.range.endIndex as number);
 }
 
-/** Return true if any updateParagraphStyle sets indentStart for the given nesting level. */
-function hasIndentAtLevel(requests: object[], nestingLevel: number): boolean {
-  const expectedMagnitude = 36 * nestingLevel;
-  return requests.some((r: any) => {
-    const ps = r.updateParagraphStyle?.paragraphStyle;
-    return ps?.indentStart?.magnitude === expectedMagnitude;
-  });
+/** Return the number of createParagraphBullets requests. */
+function bulletRequestCount(requests: object[]): number {
+  return requests.filter((r: any) => r.createParagraphBullets).length;
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -173,30 +169,28 @@ describe('markdownToGDocsRequests', () => {
       expect(texts.some(t => t.includes('['))).toBe(false);
     });
 
-    it('applies indentStart for a single-level indented task item', () => {
+    it('inserts a tab for a single-level indented task item', () => {
       const reqs = markdownToGDocsRequests('\t- [ ] Sub item');
-      expect(hasIndentAtLevel(reqs, 1)).toBe(true);
-    });
-
-    it('applies double indentStart for a double-indented task item', () => {
-      const reqs = markdownToGDocsRequests('\t\t- [ ] Deep item');
-      expect(hasIndentAtLevel(reqs, 2)).toBe(true);
-    });
-
-    it('applies indentStart for a 2-space indented task item', () => {
-      const reqs = markdownToGDocsRequests('  - [ ] Sub item');
-      expect(hasIndentAtLevel(reqs, 1)).toBe(true);
-    });
-
-    it('does not apply indentStart for top-level task items', () => {
-      const reqs = markdownToGDocsRequests('- [ ] Top level');
-      expect(hasIndentAtLevel(reqs, 1)).toBe(false);
-    });
-
-    it('does not insert tab characters for task items', () => {
-      const reqs = markdownToGDocsRequests('- [ ] general\n\t- [ ] tool kit');
       const texts = insertTexts(reqs);
-      expect(texts.some(t => t === '\t' || t === '\t\t')).toBe(false);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('inserts two tabs for a double-indented task item', () => {
+      const reqs = markdownToGDocsRequests('\t\t- [ ] Deep item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t\t')).toBe(true);
+    });
+
+    it('inserts a tab for a 2-space indented task item', () => {
+      const reqs = markdownToGDocsRequests('  - [ ] Sub item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('does not insert a tab for top-level task items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Top level');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(false);
     });
 
     it('handles a hierarchical checklist end-to-end', () => {
@@ -206,30 +200,37 @@ describe('markdownToGDocsRequests', () => {
       expect(texts.some(t => t.includes('general'))).toBe(true);
       expect(texts.some(t => t.includes('tool kit'))).toBe(true);
       expect(texts.some(t => t.includes('trash bags'))).toBe(true);
-      expect(hasIndentAtLevel(reqs, 1)).toBe(true); // nested items indented
+      // Two nested items each get a leading tab
+      expect(texts.filter(t => t === '\t').length).toBe(2);
       expect(hasStyle(reqs, 'strikethrough')).toBe(true); // trash bags is checked
     });
 
+    it('uses a single createParagraphBullets call for a consecutive list group', () => {
+      // All three task items are consecutive, so they form one batch group.
+      const md = '- [ ] general\n\t- [ ] tool kit\n- [ ] third';
+      const reqs = markdownToGDocsRequests(md);
+      expect(bulletRequestCount(reqs)).toBe(1);
+    });
+
     it('tracks index correctly across nested and top-level items', () => {
-      // No tabs are inserted, so index advances by content length only.
-      // 'general\n' (8 chars) at 1 → next at 9
-      // 'tool kit\n' (9 chars) at 9 → next at 18
-      // 'third\n' (6 chars) at 18
+      // All three items form one batch group.
+      // Insertions: 'general\n'(1), '\t'(9), 'tool kit\n'(10), 'third\n'(19)
+      // createParagraphBullets([1,25]) consumes the tab; net advance = 8+9+6 = 23.
       const md = '- [ ] general\n\t- [ ] tool kit\n- [ ] third';
       const reqs = markdownToGDocsRequests(md);
       const indices = insertIndices(reqs);
-      expect(indices).toContain(1);
-      expect(indices).toContain(9);
-      expect(indices).toContain(18);
+      expect(indices).toContain(1);   // general
+      expect(indices).toContain(9);   // tab for tool kit
+      expect(indices).toContain(10);  // tool kit
+      expect(indices).toContain(19);  // third
     });
 
-    it('createParagraphBullets range spans only the inserted content', () => {
-      // No tab characters inserted, so range = [lineStart, lineStart + content.length + 1]
-      // 'nested item\n' = 12 chars, starting at index 1 → range [1, 13]
+    it('createParagraphBullets range covers the full group including nesting tabs', () => {
+      // '\t'(1) + 'nested item\n'(12) = 13 chars → range [1, 14]
       const md = '\t- [ ] nested item';
       const reqs = markdownToGDocsRequests(md);
       const ends = bulletRangeEnds(reqs);
-      expect(ends.some(e => e === 13)).toBe(true);
+      expect(ends.some(e => e === 14)).toBe(true);
     });
   });
 
