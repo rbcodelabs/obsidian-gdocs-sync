@@ -1,7 +1,7 @@
 {
   "id": "obsidian-gdocs-sync",
   "name": "Google Docs Sync",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "minAppVersion": "1.4.0",
   "description": "Bi-directional sync between Obsidian notes and Google Docs",
   "author": "Rick Bowman",
