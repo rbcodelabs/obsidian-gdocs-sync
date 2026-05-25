@@ -6,7 +6,7 @@ import { GDocsPoller } from './GDocsPoller';
 import { FileWatcher } from './FileWatcher';
 import { FolderPoller } from './FolderPoller';
 import { ConflictResolver } from './ConflictResolver';
-import { gdocsToMarkdown } from '../converter/GDocsToMarkdown';
+import { htmlToMarkdown, extractDocTitle } from '../converter/HtmlToMarkdown';
 import { markdownToGDocsRequests } from '../converter/MarkdownToGDocs';
 
 type PluginWithSettings = Plugin & {
@@ -247,8 +247,8 @@ export class SyncEngine {
     }
 
     try {
-      const doc = await this.api.getDocument(docId);
-      const remoteMarkdown = gdocsToMarkdown(doc);
+      const html = await this.api.exportAsHtml(docId);
+      const remoteMarkdown = htmlToMarkdown(html);
 
       if (!forceRemote) {
         // Hash-based conflict detection: check whether local content has changed
@@ -328,8 +328,9 @@ export class SyncEngine {
     }
 
     try {
-      const doc = await this.api.getDocument(docId);
-      const markdown = gdocsToMarkdown(doc);
+      const html = await this.api.exportAsHtml(docId);
+      const markdown = htmlToMarkdown(html);
+      const title = extractDocTitle(html);
       const hash = await sha256(markdown);
 
       const docUrl = `https://docs.google.com/document/d/${docId}/edit`;
@@ -348,7 +349,7 @@ export class SyncEngine {
       const noteContent = frontmatter + markdown;
 
       // Use the Google Doc title as the note filename, sanitised for the OS
-      const safeTitle = (doc.title || 'Imported Google Doc')
+      const safeTitle = (title || 'Imported Google Doc')
         .replace(/[/\\:*?"<>|]/g, '-')
         .trim();
 
@@ -359,7 +360,7 @@ export class SyncEngine {
       const revision = await this.api.getDocumentRevision(docId);
       this.syncedDocs.set(docId, revision);
 
-      new Notice(`✓ Imported "${doc.title}" as ${notePath}`);
+      new Notice(`✓ Imported "${title}" as ${notePath}`);
     } catch (err) {
       console.error('[SyncEngine] importGoogleDoc error:', err);
       new Notice(`⚠ GDocs Sync: Import failed — ${(err as Error).message}`);
@@ -413,8 +414,8 @@ export class SyncEngine {
       }
 
       try {
-        const doc = await this.api.getDocument(driveFile.id);
-        const markdown = gdocsToMarkdown(doc);
+        const html = await this.api.exportAsHtml(driveFile.id);
+        const markdown = htmlToMarkdown(html);
         const hash = await sha256(markdown);
         const docUrl = `https://docs.google.com/document/d/${driveFile.id}/edit`;
 

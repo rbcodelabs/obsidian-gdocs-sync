@@ -116,6 +116,27 @@ export class GoogleDocsAPI {
   }
 
   /**
+   * Export a Google Doc as HTML via the Drive API.
+   * Returns the raw HTML string — suitable for feeding into HtmlToMarkdown.
+   * Uses the Drive export endpoint which produces richer, more stable HTML
+   * than the Docs REST API's JSON representation.
+   */
+  async exportAsHtml(docId: string): Promise<string> {
+    const token = await this.tokenStore.getValidAccessToken();
+    const url = `${DRIVE_BASE}/files/${docId}/export?mimeType=text%2Fhtml`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Google Drive export error ${response.status} ${response.statusText}: ${body}`,
+      );
+    }
+    return response.text();
+  }
+
+  /**
    * Create a new Google Doc with the given title.
    * Returns the new document ID and its canonical URL.
    */
