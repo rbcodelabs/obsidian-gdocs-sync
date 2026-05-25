@@ -3,8 +3,12 @@ import { Plugin } from 'obsidian';
 export class StatusBarItem {
   private el: HTMLElement;
 
-  constructor(plugin: Plugin) {
+  constructor(plugin: Plugin, onClick?: () => void) {
     this.el = plugin.addStatusBarItem();
+    if (onClick) {
+      this.el.style.cursor = 'pointer';
+      this.el.addEventListener('click', onClick);
+    }
     this.setIdle();
   }
 

@@ -8,6 +8,7 @@ import { StatusBarItem } from './ui/StatusBar';
 import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
+import { SyncStatusModal } from './ui/SyncStatusModal';
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -28,7 +29,9 @@ export default class GDocsPlugin extends Plugin {
     this.auth = new GoogleAuth(this, this.tokenStore);
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.syncEngine = new SyncEngine(this, this.api, this.tokenStore);
-    this.statusBar = new StatusBarItem(this);
+    this.statusBar = new StatusBarItem(this, () => {
+      new SyncStatusModal(this.app, this as unknown as GDocsPluginInterface).open();
+    });
 
     // ── OAuth protocol handler — registered once here, persistent for plugin lifetime ──
     // Handles obsidian://gdocs-sync?action=auth_complete&... redirects from the proxy.
