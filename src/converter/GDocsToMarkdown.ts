@@ -95,6 +95,9 @@ const ORDERED_GLYPH_TYPES = new Set([
   'DECIMAL', 'ZERO_DECIMAL', 'UPPER_ALPHA', 'ALPHA', 'UPPER_ROMAN', 'ROMAN',
 ]);
 
+// Unicode checkbox characters Google Docs uses for BULLET_CHECKBOX lists
+const CHECKBOX_GLYPH_SYMBOLS = new Set(['☐', '☑', '☒', '☐', '☑', '☒']);
+
 function isOrderedList(
   lists: Record<string, DocumentList> | undefined,
   listId: string,
@@ -103,6 +106,58 @@ function isOrderedList(
   if (!lists) return false;
   const level = lists[listId]?.listProperties?.nestingLevels?.[nestingLevel];
   return !!level?.glyphType && ORDERED_GLYPH_TYPES.has(level.glyphType);
+}
+
+/**
+ * Returns true if the list at this nesting level is a checkbox (BULLET_CHECKBOX) list.
+ * Detection strategy: checkbox lists have a known checkbox glyph symbol, OR have
+ * neither a standard glyphSymbol nor an ordered glyphType (the absence pattern
+ * Google uses for BULLET_CHECKBOX).
+ */
+function isCheckboxList(
+  lists: Record<string, DocumentList> | undefined,
+  listId: string,
+  nestingLevel: number,
+): boolean {
+  if (!lists) return false;
+  const level = lists[listId]?.listProperties?.nestingLevels?.[nestingLevel];
+  if (!level) return false;
+  if (level.glyphSymbol && CHECKBOX_GLYPH_SYMBOLS.has(level.glyphSymbol)) return true;
+  const isOrdered = !!level.glyphType && ORDERED_GLYPH_TYPES.has(level.glyphType);
+  // No bullet symbol and not ordered → BULLET_CHECKBOX preset
+  return !level.glyphSymbol && !isOrdered;
+}
+
+/**
+ * Returns true if a checkbox paragraph is checked.
+ *
+ * The Google Docs REST API v1 does not expose checkbox checked state via any
+ * dedicated field — probing confirmed checkboxState is absent from all responses
+ * and throws a 400 if you try to write it. The only detectable signal is
+ * strikethrough on all non-empty text runs, which both our push (for [x] items)
+ * and the Google Docs UI apply when a box is checked.
+ */
+function isCheckboxChecked(para: Paragraph): boolean {
+  const runs = (para.elements ?? []).filter(el => {
+    const t = el.textRun?.content ?? '';
+    return t !== '' && t !== '\n';
+  });
+  return runs.length > 0 && runs.every(el => el.textRun?.textStyle?.strikethrough === true);
+}
+
+/**
+ * Render a checkbox paragraph's text with inline styles applied but with
+ * strikethrough suppressed — the checked state is encoded as [x] not ~~text~~.
+ */
+function renderCheckboxText(para: Paragraph): string {
+  const raw = (para.elements ?? [])
+    .map((el: ParagraphElement) => {
+      const style = el.textRun?.textStyle;
+      const cleanStyle = style ? { ...style, strikethrough: false } : style;
+      return applyTextStyle(el.textRun?.content ?? '', cleanStyle as typeof style);
+    })
+    .join('');
+  return raw.endsWith('\n') ? raw.slice(0, -1) : raw;
 }
 
 // ─── Paragraph rendering ──────────────────────────────────────────────────────
@@ -127,6 +182,15 @@ function renderParagraph(
     const listId = para.bullet?.listId ?? '';
     const ordered = isOrderedList(lists, listId, nestingLevel);
     const indent = '  '.repeat(nestingLevel);
+
+    if (!ordered && isCheckboxList(lists, listId, nestingLevel)) {
+      // Render as a Markdown task list item. Use renderCheckboxText so
+      // strikethrough is not emitted as ~~text~~ — checked state is [x].
+      const checkboxText = renderCheckboxText(para);
+      const prefix = isCheckboxChecked(para) ? '- [x] ' : '- [ ] ';
+      return { text: `${indent}${prefix}${checkboxText}`, isList: true };
+    }
+
     const prefix = ordered ? '1. ' : '- ';
     return { text: `${indent}${prefix}${lineText}`, isList: true };
   }

@@ -30,6 +30,25 @@ function hasBullet(requests: object[], ordered: boolean): boolean {
   });
 }
 
+/** Return the insertText index values in order. */
+function insertIndices(requests: object[]): number[] {
+  return requests
+    .filter((r: any) => r.insertText)
+    .map((r: any) => r.insertText.location.index as number);
+}
+
+/** Return all createParagraphBullets range end-indices. */
+function bulletRangeEnds(requests: object[]): number[] {
+  return requests
+    .filter((r: any) => r.createParagraphBullets)
+    .map((r: any) => r.createParagraphBullets.range.endIndex as number);
+}
+
+/** Return the number of createParagraphBullets requests. */
+function bulletRequestCount(requests: object[]): number {
+  return requests.filter((r: any) => r.createParagraphBullets).length;
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('markdownToGDocsRequests', () => {
@@ -125,6 +144,93 @@ describe('markdownToGDocsRequests', () => {
       const reqs = markdownToGDocsRequests('- My item');
       const texts = insertTexts(reqs);
       expect(texts.some(t => /^-\s/.test(t))).toBe(false);
+    });
+  });
+
+  describe('task lists', () => {
+    it('uses BULLET_CHECKBOX preset for - [ ] items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Pack tent');
+      expect(reqs.some((r: any) => r.createParagraphBullets?.bulletPreset === 'BULLET_CHECKBOX')).toBe(true);
+    });
+
+    it('does not apply strikethrough for unchecked items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Pack tent');
+      expect(hasStyle(reqs, 'strikethrough')).toBe(false);
+    });
+
+    it('applies strikethrough for - [x] items', () => {
+      const reqs = markdownToGDocsRequests('- [x] Done thing');
+      expect(hasStyle(reqs, 'strikethrough')).toBe(true);
+    });
+
+    it('does not include [ ] or [x] in the inserted text', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Item\n- [x] Done');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t.includes('['))).toBe(false);
+    });
+
+    it('inserts a tab for a single-level indented task item', () => {
+      const reqs = markdownToGDocsRequests('\t- [ ] Sub item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('inserts two tabs for a double-indented task item', () => {
+      const reqs = markdownToGDocsRequests('\t\t- [ ] Deep item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t\t')).toBe(true);
+    });
+
+    it('inserts a tab for a 2-space indented task item', () => {
+      const reqs = markdownToGDocsRequests('  - [ ] Sub item');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(true);
+    });
+
+    it('does not insert a tab for top-level task items', () => {
+      const reqs = markdownToGDocsRequests('- [ ] Top level');
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t === '\t')).toBe(false);
+    });
+
+    it('handles a hierarchical checklist end-to-end', () => {
+      const md = '- [ ] general\n\t- [ ] tool kit\n\t- [x] trash bags';
+      const reqs = markdownToGDocsRequests(md);
+      const texts = insertTexts(reqs);
+      expect(texts.some(t => t.includes('general'))).toBe(true);
+      expect(texts.some(t => t.includes('tool kit'))).toBe(true);
+      expect(texts.some(t => t.includes('trash bags'))).toBe(true);
+      // Two nested items each get a leading tab
+      expect(texts.filter(t => t === '\t').length).toBe(2);
+      expect(hasStyle(reqs, 'strikethrough')).toBe(true); // trash bags is checked
+    });
+
+    it('uses a single createParagraphBullets call for a consecutive list group', () => {
+      // All three task items are consecutive, so they form one batch group.
+      const md = '- [ ] general\n\t- [ ] tool kit\n- [ ] third';
+      const reqs = markdownToGDocsRequests(md);
+      expect(bulletRequestCount(reqs)).toBe(1);
+    });
+
+    it('tracks index correctly across nested and top-level items', () => {
+      // All three items form one batch group.
+      // Insertions: 'general\n'(1), '\t'(9), 'tool kit\n'(10), 'third\n'(19)
+      // createParagraphBullets([1,25]) consumes the tab; net advance = 8+9+6 = 23.
+      const md = '- [ ] general\n\t- [ ] tool kit\n- [ ] third';
+      const reqs = markdownToGDocsRequests(md);
+      const indices = insertIndices(reqs);
+      expect(indices).toContain(1);   // general
+      expect(indices).toContain(9);   // tab for tool kit
+      expect(indices).toContain(10);  // tool kit
+      expect(indices).toContain(19);  // third
+    });
+
+    it('createParagraphBullets range covers the full group including nesting tabs', () => {
+      // '\t'(1) + 'nested item\n'(12) = 13 chars → range [1, 14]
+      const md = '\t- [ ] nested item';
+      const reqs = markdownToGDocsRequests(md);
+      const ends = bulletRangeEnds(reqs);
+      expect(ends.some(e => e === 14)).toBe(true);
     });
   });
 

@@ -1,6 +1,6 @@
 // TODO: v2 — replace this line-by-line parser with a remark/unified AST pipeline.
-// Current limitations: no tables, no nested list nesting levels, no reference-
-// style links, no blockquotes, no multi-paragraph list items.
+// Current limitations: no tables, no reference-style links, no blockquotes,
+// no multi-paragraph list items.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -11,6 +11,18 @@ interface TextSegment {
   strikethrough?: boolean;
   code?: boolean;
   linkUrl?: string;
+}
+
+type BulletPreset =
+  | 'BULLET_CHECKBOX'
+  | 'BULLET_DISC_CIRCLE_SQUARE'
+  | 'NUMBERED_DECIMAL_ALPHA_ROMAN';
+
+interface PendingListItem {
+  nestingLevel: number;
+  content: string; // raw markdown (may have inline styles)
+  checked?: boolean; // task items only
+  preset: BulletPreset;
 }
 
 // ─── Inline style parser ──────────────────────────────────────────────────────
@@ -121,17 +133,26 @@ function updateTextStyleRequest(
   };
 }
 
-function createParagraphBulletsRequest(
-  startIndex: number,
-  endIndex: number,
-  ordered: boolean,
-): object {
-  return {
-    createParagraphBullets: {
-      range: { startIndex, endIndex },
-      bulletPreset: ordered ? 'NUMBERED_DECIMAL_ALPHA_ROMAN' : 'BULLET_DISC_CIRCLE_SQUARE',
-    },
-  };
+// ─── List nesting helpers ─────────────────────────────────────────────────────
+
+/**
+ * Convert Markdown list indentation to a nesting level.
+ * 1 tab = 1 level; 2 spaces = 1 level (standard Markdown convention).
+ */
+function indentToNestingLevel(indent: string): number {
+  let level = 0;
+  let i = 0;
+  while (i < indent.length) {
+    if (indent[i] === '\t') {
+      level++;
+      i++;
+    } else {
+      let spaces = 0;
+      while (i < indent.length && indent[i] === ' ') { spaces++; i++; }
+      level += Math.floor(spaces / 2);
+    }
+  }
+  return level;
 }
 
 // ─── Heading helpers ──────────────────────────────────────────────────────────
@@ -183,8 +204,16 @@ function insertLineWithStyles(
  *
  * Supported:
  *   Headings H1–H6, bold, italic, bold+italic, strikethrough, inline code,
- *   links, unordered lists, ordered lists, fenced code blocks (``` / ~~~),
- *   horizontal rules (---, ***, ___), blank line separators.
+ *   links, unordered lists, ordered lists, task lists (- [ ] / - [x]),
+ *   fenced code blocks (``` / ~~~), horizontal rules (---, ***, ___),
+ *   blank line separators.
+ *
+ * List nesting strategy: consecutive items of the same bullet preset are
+ * buffered, then emitted as a single createParagraphBullets call covering
+ * the full range. Leading tab characters are inserted for nested items before
+ * the call so the API reads them as nesting signals (Approach B). Inline
+ * style and strikethrough requests use post-consumption positions (tabs
+ * removed by createParagraphBullets are not counted in subsequent indices).
  */
 export function markdownToGDocsRequests(markdown: string): object[] {
   const requests: object[] = [];
@@ -192,20 +221,111 @@ export function markdownToGDocsRequests(markdown: string): object[] {
   let index = 1; // GDocs body content starts at index 1
   let inCodeBlock = false;
 
+  // ── List buffer ─────────────────────────────────────────────────────────────
+  // Consecutive list items are buffered and flushed as one createParagraphBullets
+  // call so that leading \t chars correctly set the nesting level via the API.
+
+  let pending: PendingListItem[] = [];
+  let pendingPreset: BulletPreset | null = null;
+  let pendingStart = 1;
+
+  function flushList() {
+    if (pending.length === 0) return;
+
+    // Pre-compute segments and advance (chars inserted) for each item.
+    const items = pending.map(item => {
+      const segments = parseInlineStyles(item.content);
+      const plainText = segments.map(s => s.text).join('');
+      return { ...item, segments, plainText, advance: plainText.length + 1 /* +\n */ };
+    });
+
+    // Phase 1: insert text with leading tabs for nested items.
+    let insertIdx = pendingStart;
+    for (const item of items) {
+      if (item.nestingLevel > 0) {
+        requests.push(insertTextRequest('\t'.repeat(item.nestingLevel), insertIdx));
+        insertIdx += item.nestingLevel;
+      }
+      requests.push(insertTextRequest(item.plainText + '\n', insertIdx));
+      insertIdx += item.advance;
+    }
+    const groupEnd = insertIdx;
+
+    // Phase 2: single createParagraphBullets on the full group range.
+    // The API reads leading \t chars per paragraph to set nesting level,
+    // then removes them (which reduces groupEnd by the total tab count).
+    requests.push({
+      createParagraphBullets: {
+        range: { startIndex: pendingStart, endIndex: groupEnd },
+        bulletPreset: pendingPreset!,
+      },
+    });
+
+    // Phase 3: inline styles and strikethrough using post-consumption positions.
+    // After the tabs are consumed, item k's content starts at:
+    //   pendingStart + sum(advance_i for i < k)
+    // The tab chars no longer exist in the document at this point in the batch.
+    let cumAdvance = 0;
+    for (const item of items) {
+      const postStart = pendingStart + cumAdvance;
+
+      // Inline styles
+      let segIdx = postStart;
+      for (const seg of item.segments) {
+        const segEnd = segIdx + seg.text.length;
+        const styleReq = updateTextStyleRequest(seg, segIdx, segEnd);
+        if (styleReq) requests.push(styleReq);
+        segIdx = segEnd;
+      }
+
+      // Strikethrough for checked task items
+      if (item.checked && item.content.length > 0) {
+        requests.push({
+          updateTextStyle: {
+            range: { startIndex: postStart, endIndex: postStart + item.content.length },
+            textStyle: { strikethrough: true },
+            fields: 'strikethrough',
+          },
+        });
+      }
+
+      cumAdvance += item.advance;
+    }
+
+    // Advance index: post-consumption length = sum of content advances (no tabs).
+    index = pendingStart + cumAdvance;
+    pending = [];
+    pendingPreset = null;
+  }
+
+  function addToPending(item: PendingListItem) {
+    // Flush if preset changed (e.g. ordered list after checkbox list).
+    if (pendingPreset !== null && pendingPreset !== item.preset) {
+      flushList();
+    }
+    if (pending.length === 0) {
+      pendingStart = index;
+      pendingPreset = item.preset;
+    }
+    pending.push(item);
+  }
+
+  // ── Line loop ────────────────────────────────────────────────────────────────
+
   for (const line of lines) {
 
     // ── Fenced code block fence (``` or ~~~) ─────────────────────────────────
     if (/^(`{3,}|~{3,})/.test(line)) {
+      flushList();
       inCodeBlock = !inCodeBlock;
-      // The fence line itself is not inserted into the doc
       continue;
     }
 
     // ── Inside a code block — monospace paragraph ─────────────────────────────
     if (inCodeBlock) {
+      flushList();
       const lineText = line + '\n';
       requests.push(insertTextRequest(lineText, index));
-      // Apply monospace font to the code text (not the trailing \n)
       if (line.length > 0) {
         requests.push({
           updateTextStyle: {
@@ -221,6 +341,7 @@ export function markdownToGDocsRequests(markdown: string): object[] {
 
     // ── Blank line ────────────────────────────────────────────────────────────
     if (line.trim() === '') {
+      flushList();
       requests.push(insertTextRequest('\n', index));
       index += 1;
       continue;
@@ -228,6 +349,7 @@ export function markdownToGDocsRequests(markdown: string): object[] {
 
     // ── Horizontal rule (---, ***, ___) ──────────────────────────────────────
     if (/^(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) {
+      flushList();
       const hrText = '─'.repeat(40) + '\n';
       requests.push(insertTextRequest(hrText, index));
       requests.push({
@@ -244,27 +366,42 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       continue;
     }
 
+    // ── Task list item (- [ ] unchecked or - [x] checked) ────────────────────
+    const taskMatch = line.match(/^(\s*)[-*]\s+\[([ xX])\]\s+(.*)/);
+    if (taskMatch) {
+      addToPending({
+        nestingLevel: indentToNestingLevel(taskMatch[1]),
+        content: taskMatch[3],
+        checked: taskMatch[2].toLowerCase() === 'x',
+        preset: 'BULLET_CHECKBOX',
+      });
+      continue;
+    }
+
     // ── Ordered list (1. 2. etc.) ─────────────────────────────────────────────
-    const orderedMatch = line.match(/^\s*\d+\.\s+(.*)/);
+    const orderedMatch = line.match(/^(\s*)\d+\.\s+(.*)/);
     if (orderedMatch) {
-      const lineStart = index;
-      const advance = insertLineWithStyles(orderedMatch[1], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, true));
-      index += advance;
+      addToPending({
+        nestingLevel: indentToNestingLevel(orderedMatch[1]),
+        content: orderedMatch[2],
+        preset: 'NUMBERED_DECIMAL_ALPHA_ROMAN',
+      });
       continue;
     }
 
     // ── Unordered list (- or *) ───────────────────────────────────────────────
-    const unorderedMatch = line.match(/^\s*[*-]\s+(.*)/);
+    const unorderedMatch = line.match(/^(\s*)[*-]\s+(.*)/);
     if (unorderedMatch) {
-      const lineStart = index;
-      const advance = insertLineWithStyles(unorderedMatch[1], index, requests);
-      requests.push(createParagraphBulletsRequest(lineStart, lineStart + advance, false));
-      index += advance;
+      addToPending({
+        nestingLevel: indentToNestingLevel(unorderedMatch[1]),
+        content: unorderedMatch[2],
+        preset: 'BULLET_DISC_CIRCLE_SQUARE',
+      });
       continue;
     }
 
     // ── Heading ───────────────────────────────────────────────────────────────
+    flushList();
     const heading = parseHeading(line);
     if (heading) {
       const lineStart = index;
@@ -281,8 +418,10 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     }
 
     // ── Normal paragraph ──────────────────────────────────────────────────────
+    flushList();
     index += insertLineWithStyles(line, index, requests);
   }
 
+  flushList();
   return requests;
 }

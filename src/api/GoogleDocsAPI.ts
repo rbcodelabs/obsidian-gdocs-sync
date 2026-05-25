@@ -20,7 +20,12 @@ export type ParagraphElement = {
 
 export type Paragraph = {
   elements: ParagraphElement[];
-  paragraphStyle?: { namedStyleType?: string };
+  paragraphStyle?: {
+    namedStyleType?: string;
+    // NOTE: the Google Docs REST API v1 does NOT expose checkbox checked state.
+    // checkboxState is not a valid API field (throws 400 on write, absent on read).
+    // The only signal is strikethrough on text runs — see isCheckboxChecked().
+  };
   bullet?: { listId: string; nestingLevel?: number };
 };
 
@@ -108,6 +113,27 @@ export class GoogleDocsAPI {
    */
   async getDocument(docId: string): Promise<GoogleDocument> {
     return this.request<GoogleDocument>(`${DOCS_BASE}/${docId}`);
+  }
+
+  /**
+   * Export a Google Doc as HTML via the Drive API.
+   * Returns the raw HTML string — suitable for feeding into HtmlToMarkdown.
+   * Uses the Drive export endpoint which produces richer, more stable HTML
+   * than the Docs REST API's JSON representation.
+   */
+  async exportAsHtml(docId: string): Promise<string> {
+    const token = await this.tokenStore.getValidAccessToken();
+    const url = `${DRIVE_BASE}/files/${docId}/export?mimeType=text%2Fhtml`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Google Drive export error ${response.status} ${response.statusText}: ${body}`,
+      );
+    }
+    return response.text();
   }
 
   /**
