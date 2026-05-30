@@ -208,6 +208,11 @@ export default class GDocsPlugin extends Plugin {
     // Only start if the user is already connected (has valid tokens).
     if (this.tokenStore.get() !== null) {
       try {
+        // Eagerly validate the token on startup so we immediately show
+        // "reconnect required" if the refresh token has been revoked — rather
+        // than waiting up to pollIntervalSeconds for the first poll to fire.
+        // If the access token is still fresh this is a no-op (no network call).
+        await this.tokenStore.getValidAccessToken();
         await this.syncEngine.start();
         this.statusBar.setIdle();
       } catch (err) {
