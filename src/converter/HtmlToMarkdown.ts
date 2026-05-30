@@ -281,14 +281,23 @@ function isLiChecked(li: Element): boolean {
 /**
  * Render a <table> element as a GFM pipe table.
  * Treats the first <tr> as the header row; generates a separator row after it.
+ * Cells that contain <p> children have their paragraphs joined with " / ".
  */
 function renderTable(table: Element): string {
   const rows = Array.from(table.querySelectorAll('tr'));
   if (rows.length === 0) return '';
 
+  const renderCell = (cell: Element): string => {
+    const paras = Array.from(cell.querySelectorAll(':scope > p'));
+    if (paras.length > 0) {
+      return paras.map(p => renderContent(p).trim()).filter(Boolean).join(' / ').replace(/\|/g, '\\|');
+    }
+    return renderContent(cell).trim().replace(/\|/g, '\\|');
+  };
+
   const renderRow = (tr: Element): string => {
     const cells = Array.from(tr.querySelectorAll('th, td'));
-    return '| ' + cells.map(c => renderContent(c).trim().replace(/\|/g, '\\|')).join(' | ') + ' |';
+    return '| ' + cells.map(renderCell).join(' | ') + ' |';
   };
 
   const [headerRow, ...bodyRows] = rows;
@@ -339,6 +348,129 @@ function emitBlock(ctx: WalkCtx, text: string): void {
 }
 
 /**
+ * Walk a single top-level element, dispatching to the appropriate handler and
+ * mutating `ctx`. Extracted so the div-wrapper fallback can recurse directly
+ * into children without re-parsing via `htmlToMarkdown`, which would cause
+ * infinite recursion when a `<div>` wraps the entire body.
+ */
+function walkElement(child: Element, ctx: WalkCtx): void {
+  const tag = child.tagName.toLowerCase();
+
+  // ── Headings ──────────────────────────────────────────────────────────────
+  if (/^h[1-6]$/.test(tag)) {
+    const level = parseInt(tag[1], 10);
+    // suppressBold: Google Docs wraps ALL heading text in font-weight:700 spans
+    // as an inherent heading style — the # marker already implies heading weight.
+    const text = renderContent(child, { suppressBold: true }).trim();
+    emitBlock(ctx, '#'.repeat(level) + ' ' + text);
+    ctx.prevWasList = false;
+    return;
+  }
+
+  // ── Paragraphs ────────────────────────────────────────────────────────────
+  if (tag === 'p') {
+    if (isCodeParagraph(child)) {
+      // A single GDocs code-paragraph may contain multiple lines separated
+      // by <br> elements (this is how Google exports <pre><code> blocks).
+      const raw = extractCodeText(child);
+      for (const line of raw.split('\n')) ctx.codeBuffer.push(line);
+      ctx.prevWasList = false;
+      return;
+    }
+
+    flushCode(ctx);
+    // Trim and collapse multiple spaces that arise from HTML indentation whitespace
+    // between inline elements. Google Docs' actual export has no such indentation,
+    // but tests and some editors produce it.
+    const text = renderContent(child).trim().replace(/  +/g, ' ');
+
+    // Skip the structural empty first paragraph Google inserts at doc start
+    if (text === '' && ctx.lines.length === 0) return;
+
+    if (text === '') {
+      emitBlock(ctx, '');
+    } else {
+      emitBlock(ctx, text);
+    }
+    ctx.prevWasList = false;
+    return;
+  }
+
+  // ── Lists (unordered, ordered, checkbox) ──────────────────────────────────
+  if (tag === 'ul' || tag === 'ol') {
+    flushCode(ctx);
+
+    const level       = getListLevel(child);
+    const indent      = '  '.repeat(level);
+    const isOrdered   = tag === 'ol';
+    const isCheckbox  = !isOrdered && isCheckboxList(child);
+
+    // Add a blank line before the first item of a list group only when
+    // transitioning from non-list content — consecutive list siblings
+    // (including nested-level siblings) get no separator.
+    const items = Array.from(child.querySelectorAll(':scope > li'));
+    for (let i = 0; i < items.length; i++) {
+      const li = items[i];
+
+      const textOpts: RenderOpts = isCheckbox ? { suppressStrikethrough: true } : {};
+      // .trim() removes leading/trailing whitespace that HTML indentation creates
+      // (text nodes between the <li> tag and its first <span> child)
+      const itemText = renderContent(li, textOpts).trim();
+
+      let prefix: string;
+      if (isCheckbox) {
+        prefix = isLiChecked(li) ? '- [x] ' : '- [ ] ';
+      } else if (isOrdered) {
+        prefix = '1. ';
+      } else {
+        prefix = '- ';
+      }
+
+      const line     = `${indent}${prefix}${itemText}`;
+      const isFirst  = i === 0 && !ctx.prevWasList;
+
+      if (isFirst && ctx.lines.length > 0 && ctx.lines[ctx.lines.length - 1] !== '') {
+        ctx.lines.push('');
+      }
+      ctx.lines.push(line);
+    }
+
+    ctx.prevWasList = true;
+    return;
+  }
+
+  // ── Horizontal rules ──────────────────────────────────────────────────────
+  if (tag === 'hr') {
+    emitBlock(ctx, '---');
+    ctx.prevWasList = false;
+    return;
+  }
+
+  // ── Native <pre> code blocks ──────────────────────────────────────────────
+  if (tag === 'pre') {
+    const codeEl = child.querySelector('code') ?? child;
+    const raw    = extractCodeText(codeEl);
+    for (const line of raw.split('\n')) ctx.codeBuffer.push(line);
+    ctx.prevWasList = false;
+    return;
+  }
+
+  // ── Tables ────────────────────────────────────────────────────────────────
+  if (tag === 'table') {
+    emitBlock(ctx, renderTable(child));
+    ctx.prevWasList = false;
+    return;
+  }
+
+  // All other elements (div wrappers, etc.) — recurse directly into children.
+  // Recursing into children (not re-parsing via htmlToMarkdown) avoids infinite
+  // recursion when a <div> wraps the entire body content.
+  for (const inner of Array.from(child.children)) {
+    walkElement(inner, ctx);
+  }
+}
+
+/**
  * Convert a Google Docs HTML export string to Markdown.
  *
  * Relies on `DOMParser` being available in the execution context.
@@ -350,120 +482,7 @@ export function htmlToMarkdown(html: string): string {
   const ctx: WalkCtx = { lines: [], codeBuffer: [], prevWasList: false };
 
   for (const child of Array.from(dom.body.children)) {
-    const tag = child.tagName.toLowerCase();
-
-    // ── Headings ──────────────────────────────────────────────────────────────
-    if (/^h[1-6]$/.test(tag)) {
-      const level = parseInt(tag[1], 10);
-      // suppressBold: Google Docs wraps ALL heading text in font-weight:700 spans
-      // as an inherent heading style — the # marker already implies heading weight.
-      const text = renderContent(child, { suppressBold: true }).trim();
-      emitBlock(ctx, '#'.repeat(level) + ' ' + text);
-      ctx.prevWasList = false;
-      continue;
-    }
-
-    // ── Paragraphs ────────────────────────────────────────────────────────────
-    if (tag === 'p') {
-      if (isCodeParagraph(child)) {
-        // A single GDocs code-paragraph may contain multiple lines separated
-        // by <br> elements (this is how Google exports <pre><code> blocks).
-        const raw = extractCodeText(child);
-        for (const line of raw.split('\n')) ctx.codeBuffer.push(line);
-        ctx.prevWasList = false;
-        continue;
-      }
-
-      flushCode(ctx);
-      // Trim and collapse multiple spaces that arise from HTML indentation whitespace
-      // between inline elements. Google Docs' actual export has no such indentation,
-      // but tests and some editors produce it.
-      const text = renderContent(child).trim().replace(/  +/g, ' ');
-
-      // Skip the structural empty first paragraph Google inserts at doc start
-      if (text === '' && ctx.lines.length === 0) continue;
-
-      if (text === '') {
-        emitBlock(ctx, '');
-      } else {
-        emitBlock(ctx, text);
-      }
-      ctx.prevWasList = false;
-      continue;
-    }
-
-    // ── Lists (unordered, ordered, checkbox) ──────────────────────────────────
-    if (tag === 'ul' || tag === 'ol') {
-      flushCode(ctx);
-
-      const level       = getListLevel(child);
-      const indent      = '  '.repeat(level);
-      const isOrdered   = tag === 'ol';
-      const isCheckbox  = !isOrdered && isCheckboxList(child);
-
-      // Add a blank line before the first item of a list group only when
-      // transitioning from non-list content — consecutive list siblings
-      // (including nested-level siblings) get no separator.
-      const items = Array.from(child.querySelectorAll(':scope > li'));
-      for (let i = 0; i < items.length; i++) {
-        const li = items[i];
-
-        const textOpts: RenderOpts = isCheckbox ? { suppressStrikethrough: true } : {};
-        // .trim() removes leading/trailing whitespace that HTML indentation creates
-        // (text nodes between the <li> tag and its first <span> child)
-        const itemText = renderContent(li, textOpts).trim();
-
-        let prefix: string;
-        if (isCheckbox) {
-          prefix = isLiChecked(li) ? '- [x] ' : '- [ ] ';
-        } else if (isOrdered) {
-          prefix = '1. ';
-        } else {
-          prefix = '- ';
-        }
-
-        const line     = `${indent}${prefix}${itemText}`;
-        const isFirst  = i === 0 && !ctx.prevWasList;
-
-        if (isFirst && ctx.lines.length > 0 && ctx.lines[ctx.lines.length - 1] !== '') {
-          ctx.lines.push('');
-        }
-        ctx.lines.push(line);
-      }
-
-      ctx.prevWasList = true;
-      continue;
-    }
-
-    // ── Horizontal rules ──────────────────────────────────────────────────────
-    if (tag === 'hr') {
-      emitBlock(ctx, '---');
-      ctx.prevWasList = false;
-      continue;
-    }
-
-    // ── Native <pre> code blocks ──────────────────────────────────────────────
-    if (tag === 'pre') {
-      const codeEl = child.querySelector('code') ?? child;
-      const raw    = extractCodeText(codeEl);
-      for (const line of raw.split('\n')) ctx.codeBuffer.push(line);
-      ctx.prevWasList = false;
-      continue;
-    }
-
-    // ── Tables ────────────────────────────────────────────────────────────────
-    if (tag === 'table') {
-      emitBlock(ctx, renderTable(child));
-      ctx.prevWasList = false;
-      continue;
-    }
-
-    // All other elements (div wrappers, etc.) — recurse into children
-    // This handles Google Docs' occasional wrapping divs.
-    if (child.children.length > 0) {
-      const inner = htmlToMarkdown(child.outerHTML);
-      if (inner) emitBlock(ctx, inner);
-    }
+    walkElement(child, ctx);
   }
 
   flushCode(ctx);

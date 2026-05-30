@@ -265,4 +265,25 @@ describe('markdownToGDocsRequests', () => {
       expect(texts.some(t => t === '\n')).toBe(true);
     });
   });
+
+  describe('tables', () => {
+    it('wraps a GFM table in a fenced code block', () => {
+      const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const texts = reqs.filter(r => r.insertText).map(r => r.insertText.text as string).join('');
+      expect(texts).toContain('```');
+      expect(texts).toContain('| A | B |');
+      expect(texts).toContain('| --- | --- |');
+      expect(texts).toContain('| 1 | 2 |');
+    });
+
+    it('preserves content before and after a table', () => {
+      const md = 'Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const texts = reqs.filter(r => r.insertText).map(r => r.insertText.text as string).join('');
+      expect(texts).toContain('Before');
+      expect(texts).toContain('After');
+      expect(texts).toContain('| A | B |');
+    });
+  });
 });

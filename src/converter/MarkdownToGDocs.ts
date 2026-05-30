@@ -310,6 +310,25 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     pending.push(item);
   }
 
+  // ── GFM table buffer ─────────────────────────────────────────────────────────
+  // GFM table lines (| A | B |, | --- | --- |) are emitted as a fenced code
+  // block so they survive the round-trip without being parsed as plain text.
+
+  let tableBuffer: string[] = [];
+
+  const isTableLine = (l: string) => /^\s*\|/.test(l) && /\|\s*$/.test(l);
+
+  function flushTable() {
+    if (tableBuffer.length === 0) return;
+    requests.push(insertTextRequest('```\n', index)); index += 4;
+    for (const tl of tableBuffer) {
+      const text = tl + '\n';
+      requests.push(insertTextRequest(text, index)); index += text.length;
+    }
+    requests.push(insertTextRequest('```\n', index)); index += 4;
+    tableBuffer = [];
+  }
+
   // ── Line loop ────────────────────────────────────────────────────────────────
 
   for (const line of lines) {
@@ -317,6 +336,7 @@ export function markdownToGDocsRequests(markdown: string): object[] {
     // ── Fenced code block fence (``` or ~~~) ─────────────────────────────────
     if (/^(`{3,}|~{3,})/.test(line)) {
       flushList();
+      flushTable();
       inCodeBlock = !inCodeBlock;
       continue;
     }
@@ -337,6 +357,18 @@ export function markdownToGDocsRequests(markdown: string): object[] {
       }
       index += lineText.length;
       continue;
+    }
+
+    // ── GFM table line (starts and ends with |) ───────────────────────────────
+    if (isTableLine(line)) {
+      flushList();
+      tableBuffer.push(line);
+      continue;
+    }
+
+    // Flush table buffer when we hit a non-table line
+    if (tableBuffer.length > 0) {
+      flushTable();
     }
 
     // ── Blank line ────────────────────────────────────────────────────────────
@@ -423,5 +455,6 @@ export function markdownToGDocsRequests(markdown: string): object[] {
   }
 
   flushList();
+  flushTable();
   return requests;
 }

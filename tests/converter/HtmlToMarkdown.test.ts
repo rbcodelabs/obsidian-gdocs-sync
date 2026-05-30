@@ -516,6 +516,22 @@ describe('tables', () => {
     expect(md).toContain('**Header**');
     expect(md).toContain('*cell*');
   });
+
+  it('renders a table when body content is wrapped in a div', () => {
+    const html = `<!DOCTYPE html><html><head></head><body><div><table>
+    <tr><th>A</th><th>B</th></tr>
+    <tr><td>1</td><td>2</td></tr>
+  </table></div></body></html>`;
+    expect(htmlToMarkdown(html)).toBe('| A | B |\n| --- | --- |\n| 1 | 2 |');
+  });
+
+  it('joins multi-paragraph cell content with " / "', () => {
+    const html = gdoc(`<table>
+    <tr><th>Name</th><th>Notes</th></tr>
+    <tr><td><p>Alice</p></td><td><p>Line 1</p><p>Line 2</p></td></tr>
+  </table>`);
+    expect(htmlToMarkdown(html)).toContain('Line 1 / Line 2');
+  });
 });
 
 // ─── Full document integration ────────────────────────────────────────────────
