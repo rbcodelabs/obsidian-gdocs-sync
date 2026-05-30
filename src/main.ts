@@ -74,8 +74,13 @@ export default class GDocsPlugin extends Plugin {
           this.statusBar.setSynced();
           new Notice(`✓ Synced "${activeFile.basename}" to Google Docs`);
         } catch (err) {
-          this.statusBar.setError('sync failed');
-          new Notice(`⚠ Sync failed: ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          if (msg.includes('revoked')) {
+            this.statusBar.setReauthNeeded();
+          } else {
+            this.statusBar.setError('sync failed');
+          }
+          new Notice(`⚠ Sync failed: ${msg}`);
         }
       },
     });
@@ -104,8 +109,13 @@ export default class GDocsPlugin extends Plugin {
           this.statusBar.setSynced();
           new Notice(`✓ Pulled latest "${activeFile.basename}" from Google Docs`);
         } catch (err) {
-          this.statusBar.setError('pull failed');
-          new Notice(`⚠ Pull failed: ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          if (msg.includes('revoked')) {
+            this.statusBar.setReauthNeeded();
+          } else {
+            this.statusBar.setError('pull failed');
+          }
+          new Notice(`⚠ Pull failed: ${msg}`);
         }
       },
     });
@@ -202,7 +212,12 @@ export default class GDocsPlugin extends Plugin {
         this.statusBar.setIdle();
       } catch (err) {
         console.error('[GDocsPlugin] Failed to start sync engine:', err);
-        this.statusBar.setError('startup failed');
+        const msg = (err as Error).message;
+        if (msg.includes('revoked')) {
+          this.statusBar.setReauthNeeded();
+        } else {
+          this.statusBar.setError('startup failed');
+        }
       }
     } else {
       this.statusBar.setIdle();

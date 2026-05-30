@@ -27,6 +27,11 @@ export class StatusBarItem {
     this.el.setText(`⚠ GDocs: ${msg}`);
   }
 
+  /** Shown when the refresh token is invalid and the user must reconnect. */
+  setReauthNeeded(): void {
+    this.el.setText('⚠ GDocs: reconnect required');
+  }
+
   /** Default idle state shown when the plugin is running but not syncing. */
   setIdle(): void {
     this.el.setText('⇅ GDocs');

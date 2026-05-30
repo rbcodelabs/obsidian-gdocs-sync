@@ -56,8 +56,28 @@ export class TokenStore {
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`Token refresh failed (${response.status}): ${errorText}`);
+      // The proxy forwards Google's machine-readable error code as JSON
+      // { error: "invalid_grant" | "refresh_failed" | ... }.
+      let errorCode = 'refresh_failed';
+      try {
+        const errBody = await response.json() as { error?: string };
+        if (errBody.error) errorCode = errBody.error;
+      } catch {
+        // Body wasn't JSON — fall back to the status code.
+        errorCode = `http_${response.status}`;
+      }
+
+      // "invalid_grant" means the refresh token has been revoked or expired.
+      // Clear the stored tokens so the user is prompted to reconnect rather
+      // than seeing repeated auth failures on every sync attempt.
+      if (errorCode === 'invalid_grant') {
+        await this.clear();
+        throw new Error(
+          'Google account access has been revoked. Please reconnect in plugin settings.',
+        );
+      }
+
+      throw new Error(`Token refresh failed [${errorCode}]`);
     }
 
     const data = await response.json() as {
