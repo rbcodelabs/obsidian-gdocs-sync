@@ -32,14 +32,44 @@ export class SyncStatusModal extends Modal {
     const accountSection = contentEl.createDiv('gdocs-status-section');
     accountSection.createEl('h3', { text: 'Account' });
 
-    const isConnected = settings.tokens !== null;
+    const hasTokens = settings.tokens !== null;
+    const reauthNeeded = this.plugin.statusBar.reauthNeeded;
+    // Show as "connected" only if we have tokens AND auth is not broken
+    const isConnected = hasTokens && !reauthNeeded;
+
     const accountRow = accountSection.createDiv('gdocs-status-row');
-    accountRow.createEl('span', {
-      text: isConnected
-        ? `Connected as ${settings.connectedEmail || 'Google user'}`
-        : 'Not connected to Google',
-      cls: isConnected ? 'gdocs-status-ok' : 'gdocs-status-warn',
-    });
+
+    if (reauthNeeded) {
+      accountRow.createEl('span', {
+        text: '⚠ Google account token expired — reconnect required',
+        cls: 'gdocs-status-warn',
+      });
+      const reconnectBtn = accountRow.createEl('button', {
+        text: 'Reconnect Google Account',
+        cls: 'mod-cta gdocs-reconnect-btn',
+      });
+      reconnectBtn.addEventListener('click', () => {
+        void this.plugin.auth.connect();
+        this.close();
+      });
+    } else {
+      accountRow.createEl('span', {
+        text: isConnected
+          ? `Connected as ${settings.connectedEmail || 'Google user'}`
+          : 'Not connected to Google',
+        cls: isConnected ? 'gdocs-status-ok' : 'gdocs-status-warn',
+      });
+      if (!isConnected) {
+        const connectBtn = accountRow.createEl('button', {
+          text: 'Connect Google Account',
+          cls: 'mod-cta gdocs-reconnect-btn',
+        });
+        connectBtn.addEventListener('click', () => {
+          void this.plugin.auth.connect();
+          this.close();
+        });
+      }
+    }
 
     // ── Synced Documents ──────────────────────────────────────────────────────
     const docsSection = contentEl.createDiv('gdocs-status-section');
