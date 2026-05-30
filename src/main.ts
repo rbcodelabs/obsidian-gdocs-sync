@@ -42,9 +42,16 @@ export default class GDocsPlugin extends Plugin {
     });
     console.log('[GDocsPlugin] Protocol handler registered.');
 
-    // Tell auth to refresh the settings tab UI after a successful connect
+    // After a successful connect: refresh settings UI, start the sync engine,
+    // and update the status bar so it stops showing "reconnect required".
     this.auth.onConnected = () => {
       this.settingsTab?.display();
+      void this.syncEngine.start().then(() => {
+        this.statusBar.setIdle();
+      }).catch((err: Error) => {
+        console.error('[GDocsPlugin] Failed to start sync engine after reconnect:', err);
+        this.statusBar.setError('startup failed');
+      });
     };
 
     // ── Settings tab ────────────────────────────────────────────────────────
