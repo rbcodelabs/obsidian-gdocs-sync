@@ -207,20 +207,27 @@ export default class GDocsPlugin extends Plugin {
     // ── Start sync engine ────────────────────────────────────────────────────
     // Only start if the user is already connected (has valid tokens).
     if (this.tokenStore.get() !== null) {
+      // Eagerly validate the token on startup so we immediately show
+      // "reconnect required" if the refresh token has been revoked — rather
+      // than waiting up to pollIntervalSeconds for the first poll to fire.
+      // If the access token is still fresh this is a no-op (no network call).
+      // Any auth error (invalid_grant, network failure, proxy error) means
+      // the user needs to reconnect — don't attempt to start the engine.
+      let tokenOk = false;
       try {
-        // Eagerly validate the token on startup so we immediately show
-        // "reconnect required" if the refresh token has been revoked — rather
-        // than waiting up to pollIntervalSeconds for the first poll to fire.
-        // If the access token is still fresh this is a no-op (no network call).
         await this.tokenStore.getValidAccessToken();
-        await this.syncEngine.start();
-        this.statusBar.setIdle();
+        tokenOk = true;
       } catch (err) {
-        console.error('[GDocsPlugin] Failed to start sync engine:', err);
-        const msg = (err as Error).message;
-        if (msg.includes('revoked')) {
-          this.statusBar.setReauthNeeded();
-        } else {
+        console.error('[GDocsPlugin] Token validation failed on startup:', err);
+        this.statusBar.setReauthNeeded();
+      }
+
+      if (tokenOk) {
+        try {
+          await this.syncEngine.start();
+          this.statusBar.setIdle();
+        } catch (err) {
+          console.error('[GDocsPlugin] Failed to start sync engine:', err);
           this.statusBar.setError('startup failed');
         }
       }
