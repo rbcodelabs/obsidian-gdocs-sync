@@ -103,7 +103,26 @@ Output: `main.js` in the project root (the file Obsidian loads).
 
 ## Testing
 
-There are no automated tests yet (tracked in backlog). To test manually:
+### Automated tests
+
+The converter layer has full unit test coverage using [Vitest](https://vitest.dev/):
+
+```bash
+npm test
+```
+
+Tests live in `tests/converter/` and cover:
+
+| File | What's tested |
+|---|---|
+| `HtmlToMarkdown.test.ts` | GDocs HTML export → Markdown: headings, inline styles, lists (ordered / unordered / checkbox / nested), tables, code blocks, links, horizontal rules |
+| `MarkdownToGDocs.test.ts` | Markdown → GDocs batchUpdate requests: all block types, inline styles, list nesting, GFM tables (cell index math, header boldness, inline styles in cells) |
+
+Test payloads are captured from the live API where relevant — no mocks for conversion logic — so format regressions are caught without running Obsidian.
+
+### Manual / integration testing
+
+To verify the full sync loop end-to-end:
 
 1. Build and install the plugin (see above)
 2. Connect a Google account via plugin settings
@@ -202,7 +221,7 @@ gdocs-hash: abc123...
 | Unordered lists | ✅ | ✅ |
 | Links | ✅ | ✅ |
 | Horizontal rules | ✅ | — |
-| Tables | ❌ v2 | ❌ v2 |
+| Tables | ✅ | ✅ |
 | Nested list levels | ❌ v2 (flattened) | ✅ |
 | Blockquotes | ❌ v2 | ❌ v2 |
 
@@ -213,10 +232,9 @@ gdocs-hash: abc123...
 - [ ] Submit to Obsidian community plugins store (needs public repo + PR to `obsidian-releases`)
 - [ ] Google OAuth verification (removes "unverified app" warning for new users)
 - [ ] v2: nested list nesting in MD → GDocs direction
-- [ ] v2: table support (GFM ↔ GDocs table elements)
+- [ ] v2: blockquote support (GFM `>` ↔ GDocs quote style)
 - [ ] v2: diff/merge conflict UI instead of last-write-wins
 - [ ] v2: choose destination folder when importing a Google Doc
-- [ ] Automated tests
 
 ---
 
