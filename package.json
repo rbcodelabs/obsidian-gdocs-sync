@@ -1,6 +1,6 @@
 {
   "name": "obsidian-gdocs-sync",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Bi-directional sync between Obsidian notes and Google Docs",
   "main": "main.js",
   "scripts": {
