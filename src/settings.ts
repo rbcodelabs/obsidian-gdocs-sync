@@ -10,6 +10,7 @@ import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { SyncEngine } from './sync/SyncEngine';
+import { StatusBarItem } from './ui/StatusBar';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 
 // Expose the additional fields we need beyond the base Plugin type
@@ -19,6 +20,7 @@ export interface GDocsPluginInterface extends Plugin {
   auth: GoogleAuth;
   api: GoogleDocsAPI;
   syncEngine: SyncEngine;
+  statusBar: StatusBarItem;
 }
 
 export class GDocsSettingTab extends PluginSettingTab {

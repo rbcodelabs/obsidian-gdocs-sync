@@ -8,6 +8,7 @@ import { StatusBarItem } from './ui/StatusBar';
 import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
+import { SyncStatusModal } from './ui/SyncStatusModal';
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -28,7 +29,9 @@ export default class GDocsPlugin extends Plugin {
     this.auth = new GoogleAuth(this, this.tokenStore);
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.syncEngine = new SyncEngine(this, this.api, this.tokenStore);
-    this.statusBar = new StatusBarItem(this);
+    this.statusBar = new StatusBarItem(this, () => {
+      new SyncStatusModal(this.app, this as unknown as GDocsPluginInterface).open();
+    });
 
     // ── OAuth protocol handler — registered once here, persistent for plugin lifetime ──
     // Handles obsidian://gdocs-sync?action=auth_complete&... redirects from the proxy.
@@ -39,9 +42,16 @@ export default class GDocsPlugin extends Plugin {
     });
     console.log('[GDocsPlugin] Protocol handler registered.');
 
-    // Tell auth to refresh the settings tab UI after a successful connect
+    // After a successful connect: refresh settings UI, start the sync engine,
+    // and update the status bar so it stops showing "reconnect required".
     this.auth.onConnected = () => {
       this.settingsTab?.display();
+      void this.syncEngine.start().then(() => {
+        this.statusBar.setIdle();
+      }).catch((err: Error) => {
+        console.error('[GDocsPlugin] Failed to start sync engine after reconnect:', err);
+        this.statusBar.setError('startup failed');
+      });
     };
 
     // ── Settings tab ────────────────────────────────────────────────────────
@@ -71,8 +81,13 @@ export default class GDocsPlugin extends Plugin {
           this.statusBar.setSynced();
           new Notice(`✓ Synced "${activeFile.basename}" to Google Docs`);
         } catch (err) {
-          this.statusBar.setError('sync failed');
-          new Notice(`⚠ Sync failed: ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          if (msg.includes('revoked')) {
+            this.statusBar.setReauthNeeded();
+          } else {
+            this.statusBar.setError('sync failed');
+          }
+          new Notice(`⚠ Sync failed: ${msg}`);
         }
       },
     });
@@ -101,8 +116,13 @@ export default class GDocsPlugin extends Plugin {
           this.statusBar.setSynced();
           new Notice(`✓ Pulled latest "${activeFile.basename}" from Google Docs`);
         } catch (err) {
-          this.statusBar.setError('pull failed');
-          new Notice(`⚠ Pull failed: ${(err as Error).message}`);
+          const msg = (err as Error).message;
+          if (msg.includes('revoked')) {
+            this.statusBar.setReauthNeeded();
+          } else {
+            this.statusBar.setError('pull failed');
+          }
+          new Notice(`⚠ Pull failed: ${msg}`);
         }
       },
     });
@@ -194,12 +214,29 @@ export default class GDocsPlugin extends Plugin {
     // ── Start sync engine ────────────────────────────────────────────────────
     // Only start if the user is already connected (has valid tokens).
     if (this.tokenStore.get() !== null) {
+      // Eagerly validate the token on startup so we immediately show
+      // "reconnect required" if the refresh token has been revoked — rather
+      // than waiting up to pollIntervalSeconds for the first poll to fire.
+      // If the access token is still fresh this is a no-op (no network call).
+      // Any auth error (invalid_grant, network failure, proxy error) means
+      // the user needs to reconnect — don't attempt to start the engine.
+      let tokenOk = false;
       try {
-        await this.syncEngine.start();
-        this.statusBar.setIdle();
+        await this.tokenStore.getValidAccessToken();
+        tokenOk = true;
       } catch (err) {
-        console.error('[GDocsPlugin] Failed to start sync engine:', err);
-        this.statusBar.setError('startup failed');
+        console.error('[GDocsPlugin] Token validation failed on startup:', err);
+        this.statusBar.setReauthNeeded();
+      }
+
+      if (tokenOk) {
+        try {
+          await this.syncEngine.start();
+          this.statusBar.setIdle();
+        } catch (err) {
+          console.error('[GDocsPlugin] Failed to start sync engine:', err);
+          this.statusBar.setError('startup failed');
+        }
       }
     } else {
       this.statusBar.setIdle();

@@ -88,6 +88,16 @@ export class SyncEngine {
     this.folderPoller.stop();
   }
 
+  /** Returns the set of docIds currently registered for polling. */
+  getSyncedDocIds(): Set<string> {
+    return new Set(this.syncedDocs.keys());
+  }
+
+  /** Returns true if the given file path or docId is currently mid-sync. */
+  isSyncing(key: string): boolean {
+    return this.syncQueue.has(key);
+  }
+
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
   /**
