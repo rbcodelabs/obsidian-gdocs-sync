@@ -267,23 +267,89 @@ describe('markdownToGDocsRequests', () => {
   });
 
   describe('tables', () => {
-    it('wraps a GFM table in a fenced code block', () => {
+    it('emits an insertTable request for a GFM table', () => {
       const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
       const reqs = markdownToGDocsRequests(md) as any[];
-      const texts = reqs.filter(r => r.insertText).map(r => r.insertText.text as string).join('');
-      expect(texts).toContain('```');
-      expect(texts).toContain('| A | B |');
-      expect(texts).toContain('| --- | --- |');
-      expect(texts).toContain('| 1 | 2 |');
+      const tableReq = reqs.find(r => r.insertTable);
+      expect(tableReq).toBeDefined();
+      expect(tableReq.insertTable.rows).toBe(2);    // header + 1 data row
+      expect(tableReq.insertTable.columns).toBe(2);
+      expect(tableReq.insertTable.location.index).toBe(1);
+    });
+
+    it('inserts cell text with correct offsets', () => {
+      const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const textReqs = reqs.filter(r => r.insertText) as any[];
+      const texts = textReqs.map(r => r.insertText.text as string);
+
+      // All four cell values should appear (header + data)
+      expect(texts).toContain('A');
+      expect(texts).toContain('B');
+      expect(texts).toContain('1');
+      expect(texts).toContain('2');
+
+      // No pipe characters or separator rows should leak into insertText
+      expect(texts.join('')).not.toContain('|');
+      expect(texts.join('')).not.toContain('---');
+      expect(texts.join('')).not.toContain('```');
+    });
+
+    it('makes header cells bold', () => {
+      const md = '| Name | Age |\n| --- | --- |\n| Alice | 30 |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const styleReqs = reqs.filter(r => r.updateTextStyle) as any[];
+      const boldReqs = styleReqs.filter(r => r.updateTextStyle.textStyle.bold === true);
+      // Header cells "Name" and "Age" should both be bold
+      expect(boldReqs.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('places header cell (0,0) at the correct index', () => {
+      // Table at index 1, R=2, C=2 → cell(0,0) para = 1+4+0+0 = 5
+      const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const aReq = (reqs as any[]).find(r => r.insertText && r.insertText.text === 'A');
+      expect(aReq).toBeDefined();
+      expect(aReq.insertText.location.index).toBe(5); // I+4 = 1+4 = 5
+    });
+
+    it('places header cell (0,1) at the correct index', () => {
+      // Cell(0,1) para = 1+4+0+2 = 7; cumChars after 'A'(1) = 8
+      const md = '| A | B |\n| --- | --- |\n| 1 | 2 |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const bReq = (reqs as any[]).find(r => r.insertText && r.insertText.text === 'B');
+      expect(bReq).toBeDefined();
+      expect(bReq.insertText.location.index).toBe(8); // 1+4+0+2+1(A) = 8
     });
 
     it('preserves content before and after a table', () => {
       const md = 'Before\n\n| A | B |\n| --- | --- |\n| 1 | 2 |\n\nAfter';
       const reqs = markdownToGDocsRequests(md) as any[];
-      const texts = reqs.filter(r => r.insertText).map(r => r.insertText.text as string).join('');
-      expect(texts).toContain('Before');
-      expect(texts).toContain('After');
-      expect(texts).toContain('| A | B |');
+      const texts = reqs.filter((r: any) => r.insertText).map((r: any) => r.insertText.text as string);
+      expect(texts).toContain('Before\n');
+      expect(texts).toContain('After\n');
+      // Cell text (not raw GFM syntax)
+      expect(texts).toContain('A');
+      expect(texts).toContain('1');
+      // No raw pipe syntax in output
+      expect(texts.join('')).not.toContain('| A | B |');
+    });
+
+    it('handles a header-only table (no data rows)', () => {
+      const md = '| X | Y |\n| --- | --- |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const tableReq = (reqs as any[]).find(r => r.insertTable);
+      expect(tableReq).toBeDefined();
+      expect(tableReq.insertTable.rows).toBe(1); // header only
+      expect(tableReq.insertTable.columns).toBe(2);
+    });
+
+    it('applies inline styles inside table cells', () => {
+      const md = '| **Bold** | *italic* |\n| --- | --- |';
+      const reqs = markdownToGDocsRequests(md) as any[];
+      const textReqs = (reqs as any[]).filter(r => r.insertText).map(r => r.insertText.text);
+      expect(textReqs).toContain('Bold');
+      expect(textReqs).toContain('italic');
     });
   });
 });

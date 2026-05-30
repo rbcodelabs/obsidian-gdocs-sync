@@ -1,5 +1,5 @@
 // TODO: v2 — replace this line-by-line parser with a remark/unified AST pipeline.
-// Current limitations: no tables, no reference-style links, no blockquotes,
+// Current limitations: no reference-style links, no blockquotes,
 // no multi-paragraph list items.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -206,6 +206,7 @@ function insertLineWithStyles(
  *   Headings H1–H6, bold, italic, bold+italic, strikethrough, inline code,
  *   links, unordered lists, ordered lists, task lists (- [ ] / - [x]),
  *   fenced code blocks (``` / ~~~), horizontal rules (---, ***, ___),
+ *   GFM pipe tables (header row bold, inline styles in cells),
  *   blank line separators.
  *
  * List nesting strategy: consecutive items of the same bullet preset are
@@ -311,21 +312,90 @@ export function markdownToGDocsRequests(markdown: string): object[] {
   }
 
   // ── GFM table buffer ─────────────────────────────────────────────────────────
-  // GFM table lines (| A | B |, | --- | --- |) are emitted as a fenced code
-  // block so they survive the round-trip without being parsed as plain text.
+  // Consecutive GFM table lines are buffered, then flushed as a real Google Docs
+  // table via insertTable + per-cell insertText requests.
+  //
+  // Index arithmetic (probe-verified against the live API):
+  //   After `insertTable` at I for an R×C table:
+  //     Cell (r,c) paragraph = I + 4 + r*(1+2*C) + 2*c + cumChars
+  //     where cumChars = total chars inserted into cells before (r,c).
+  //   Index after full table = I + 3 + R*(1+2*C) + totalCellChars
 
   let tableBuffer: string[] = [];
 
   const isTableLine = (l: string) => /^\s*\|/.test(l) && /\|\s*$/.test(l);
 
+  /** Parse one GFM pipe-table line into trimmed cell strings. */
+  function parseTableRow(line: string): string[] {
+    return line.replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  }
+
   function flushTable() {
     if (tableBuffer.length === 0) return;
-    requests.push(insertTextRequest('```\n', index)); index += 4;
-    for (const tl of tableBuffer) {
-      const text = tl + '\n';
-      requests.push(insertTextRequest(text, index)); index += text.length;
+
+    // Need at least header + separator rows to be a valid GFM table.
+    if (tableBuffer.length < 2) {
+      // Fallback: emit raw lines as normal paragraphs.
+      for (const tl of tableBuffer) {
+        index += insertLineWithStyles(tl, index, requests);
+      }
+      tableBuffer = [];
+      return;
     }
-    requests.push(insertTextRequest('```\n', index)); index += 4;
+
+    const headers = parseTableRow(tableBuffer[0]);
+    // Row 1 is the separator (| --- | --- |) — skip it.
+    const dataRows = tableBuffer.slice(2).map(parseTableRow);
+
+    const tableRows = [headers, ...dataRows];
+    const R = tableRows.length;
+    const C = headers.length;
+    const tableStart = index;
+
+    // 1. Create the table structure.
+    requests.push({
+      insertTable: {
+        rows: R,
+        columns: C,
+        location: { index: tableStart },
+      },
+    });
+
+    // 2. Insert text into each cell (header row is bold).
+    let cumChars = 0;
+
+    for (let r = 0; r < R; r++) {
+      const isHeader = r === 0;
+      const rowCells = tableRows[r];
+
+      for (let c = 0; c < C; c++) {
+        const rawCell = (rowCells[c] ?? '').trim();
+        if (!rawCell) continue;
+
+        const cellParaIdx = tableStart + 4 + r * (1 + 2 * C) + 2 * c + cumChars;
+
+        // Parse inline styles; header cells are also bold.
+        const segments = parseInlineStyles(rawCell);
+        const plainText = segments.map(s => s.text).join('');
+
+        requests.push(insertTextRequest(plainText, cellParaIdx));
+
+        let segIdx = cellParaIdx;
+        for (const seg of segments) {
+          const effectiveSeg: TextSegment = isHeader ? { ...seg, bold: true } : seg;
+          const segEnd = segIdx + seg.text.length;
+          const styleReq = updateTextStyleRequest(effectiveSeg, segIdx, segEnd);
+          if (styleReq) requests.push(styleReq);
+          segIdx = segEnd;
+        }
+
+        cumChars += plainText.length;
+      }
+    }
+
+    // 3. Advance index past the table.
+    index = tableStart + 3 + R * (1 + 2 * C) + cumChars;
+
     tableBuffer = [];
   }
 
