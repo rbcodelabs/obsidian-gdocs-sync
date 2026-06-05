@@ -1,0 +1,77 @@
+/* ── GDocs Sync plugin styles ─────────────────────────────────────────────── */
+
+/* Status modal */
+.gdocs-status-modal .gdocs-status-section {
+  margin-bottom: 1.2em;
+}
+
+.gdocs-status-ok {
+  color: var(--color-green);
+}
+
+.gdocs-status-warn {
+  color: var(--color-orange);
+}
+
+/* Sync status pills */
+.gdocs-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.gdocs-pill-ok       { background: var(--background-modifier-success); color: var(--text-success); }
+.gdocs-pill-syncing  { background: var(--background-modifier-cover);   color: var(--text-muted); }
+.gdocs-pill-linked   { background: var(--background-secondary);        color: var(--text-muted); }
+
+/* Folder mapping rows */
+.gdocs-folder-mapping-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  flex-wrap: wrap;
+}
+
+.gdocs-folder-error-msg {
+  font-size: 0.8em;
+  color: var(--color-orange);
+  margin-left: 4px;
+}
+
+.gdocs-folder-mapping-row--error .gdocs-folder-drive,
+.gdocs-folder-mapping-row--error .gdocs-folder-vault {
+  opacity: 0.75;
+}
+
+/* Status table */
+.gdocs-status-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.gdocs-status-table th,
+.gdocs-status-table td {
+  padding: 4px 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.gdocs-time-cell {
+  color: var(--text-muted);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.gdocs-external-link {
+  text-decoration: none;
+  color: var(--text-muted);
+}
+.gdocs-external-link:hover {
+  color: var(--text-normal);
+}
+
+/* Footer */
+.gdocs-status-footer {
+  margin-top: 1em;
+  display: flex;
+  justify-content: flex-end;
+}

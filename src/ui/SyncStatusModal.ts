@@ -168,17 +168,38 @@ export class SyncStatusModal extends Modal {
       const foldersSection = contentEl.createDiv('gdocs-status-section');
       foldersSection.createEl('h3', { text: 'Folder Sync' });
 
+      const folderErrors = syncEngine.getFolderErrors();
+
       for (const mapping of folderMappings) {
         const row = foldersSection.createDiv('gdocs-folder-mapping-row');
-        row.createEl('span', {
-          text: `📁 ${mapping.driveFolderName}`,
-          cls: 'gdocs-folder-drive',
-        });
-        row.createEl('span', { text: ' → ', cls: 'gdocs-folder-arrow' });
-        row.createEl('span', {
-          text: mapping.obsidianFolder,
-          cls: 'gdocs-folder-vault',
-        });
+        const errorMsg = folderErrors.get(mapping.driveFolderId);
+
+        if (errorMsg) {
+          row.addClass('gdocs-folder-mapping-row--error');
+          row.createEl('span', {
+            text: `⚠ ${mapping.driveFolderName}`,
+            cls: 'gdocs-folder-drive gdocs-status-warn',
+          });
+          row.createEl('span', { text: ' → ', cls: 'gdocs-folder-arrow' });
+          row.createEl('span', {
+            text: mapping.obsidianFolder,
+            cls: 'gdocs-folder-vault',
+          });
+          row.createEl('span', {
+            text: errorMsg,
+            cls: 'gdocs-folder-error-msg',
+          });
+        } else {
+          row.createEl('span', {
+            text: `📁 ${mapping.driveFolderName}`,
+            cls: 'gdocs-folder-drive',
+          });
+          row.createEl('span', { text: ' → ', cls: 'gdocs-folder-arrow' });
+          row.createEl('span', {
+            text: mapping.obsidianFolder,
+            cls: 'gdocs-folder-vault',
+          });
+        }
       }
     }
 

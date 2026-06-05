@@ -98,6 +98,11 @@ export class SyncEngine {
     return this.syncQueue.has(key);
   }
 
+  /** Returns a map of folderId → error message for folder mappings currently failing. */
+  getFolderErrors(): Map<string, string> {
+    return this.folderPoller.getFolderErrors();
+  }
+
   // ─── Helpers ─────────────────────────────────────────────────────────────
 
   /**
