@@ -15,6 +15,10 @@ export type ParagraphElement = {
   startIndex?: number;
   endIndex?: number;
   textRun?: { content: string; textStyle?: TextStyle };
+  // A native horizontal rule inserted via the Google Docs UI.
+  // NOTE: the REST API v1 has no insertHorizontalRule batchUpdate request —
+  // native HRs can only be read back, not programmatically inserted.
+  horizontalRule?: object;
   inlineObjectElement?: object;
 };
 

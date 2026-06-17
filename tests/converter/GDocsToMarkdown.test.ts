@@ -55,6 +55,15 @@ function checkboxPara(
 // Checkbox list definition: no glyphSymbol, no ordered glyphType
 const checkboxList = { listProperties: { nestingLevels: [{}] } };
 
+/** A paragraph containing a native Google Docs horizontal rule element. */
+function nativeHrPara(): GoogleDocument['body']['content'][number] {
+  return {
+    paragraph: {
+      elements: [{ horizontalRule: {} }],
+    },
+  };
+}
+
 function monoPara(text: string): GoogleDocument['body']['content'][number] {
   return {
     paragraph: {
@@ -255,6 +264,74 @@ describe('gdocsToMarkdown', () => {
         { list1: { listProperties: { nestingLevels: [{ glyphSymbol: '•' }, { glyphSymbol: '◦' }] } } },
       ));
       expect(result).toBe('- Parent\n  - Child');
+    });
+  });
+
+  describe('horizontal rules', () => {
+    // MarkdownToGDocs pushes HRs as 40 BOX DRAWINGS LIGHT HORIZONTAL (─) chars
+    const HR_TEXT = '─'.repeat(40);
+
+    it('converts an em-dash paragraph back to ---', () => {
+      const result = gdocsToMarkdown(doc([para(HR_TEXT)]));
+      expect(result).toBe('---');
+    });
+
+    it('works with fewer than 40 em-dashes (still 3+)', () => {
+      expect(gdocsToMarkdown(doc([para('─'.repeat(3))]))).toBe('---');
+      expect(gdocsToMarkdown(doc([para('─'.repeat(10))]))).toBe('---');
+    });
+
+    it('does not treat a single em-dash as a rule', () => {
+      const result = gdocsToMarkdown(doc([para('─')]));
+      expect(result).not.toBe('---');
+    });
+
+    it('converts a native Google Docs horizontalRule element to ---', () => {
+      // Native HRs (inserted via the Docs UI) appear as a ParagraphElement
+      // with a `horizontalRule` field. The REST API cannot insert them but can read them.
+      expect(gdocsToMarkdown(doc([nativeHrPara()]))).toBe('---');
+    });
+
+    it('surrounds a native HR with blank lines between paragraphs', () => {
+      const result = gdocsToMarkdown(doc([
+        para('Above'),
+        nativeHrPara(),
+        para('Below'),
+      ]));
+      expect(result).toBe('Above\n\n---\n\nBelow');
+    });
+
+    it('surrounds the rule with blank lines between paragraphs', () => {
+      const result = gdocsToMarkdown(doc([
+        para('Above'),
+        para(HR_TEXT),
+        para('Below'),
+      ]));
+      expect(result).toBe('Above\n\n---\n\nBelow');
+    });
+
+    it('handles a rule at the start of the document', () => {
+      const result = gdocsToMarkdown(doc([
+        para(HR_TEXT),
+        para('After'),
+      ]));
+      expect(result).toBe('---\n\nAfter');
+    });
+
+    it('handles a rule at the end of the document', () => {
+      const result = gdocsToMarkdown(doc([
+        para('Before'),
+        para(HR_TEXT),
+      ]));
+      expect(result).toBe('Before\n\n---');
+    });
+
+    it('handles consecutive rules', () => {
+      const result = gdocsToMarkdown(doc([
+        para(HR_TEXT),
+        para(HR_TEXT),
+      ]));
+      expect(result).toBe('---\n\n---');
     });
   });
 

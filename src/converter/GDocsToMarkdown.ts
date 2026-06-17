@@ -41,6 +41,23 @@ function extractRawText(para: Paragraph): string {
     .replace(/\n$/, ''); // strip Google's structural trailing newline
 }
 
+/**
+ * Returns true if this paragraph is a horizontal rule — either:
+ *   1. A native HR inserted via the Google Docs UI (a ParagraphElement with a
+ *      `horizontalRule` field). The REST API v1 can read these but has no
+ *      insertHorizontalRule batchUpdate request to create them.
+ *   2. The em-dash approximation pushed by MarkdownToGDocs (3+ consecutive
+ *      BOX DRAWINGS LIGHT HORIZONTAL characters, U+2500).
+ */
+function isHorizontalRuleParagraph(para: Paragraph): boolean {
+  // Native HR: any element in the paragraph has a horizontalRule field
+  if ((para.elements ?? []).some(el => el.horizontalRule !== undefined)) {
+    return true;
+  }
+  // Em-dash approximation: the full paragraph text is 3+ ─ characters
+  return /^─{3,}$/.test(extractRawText(para));
+}
+
 // ─── Inline text style rendering ─────────────────────────────────────────────
 
 /**
@@ -222,6 +239,15 @@ export function gdocsToMarkdown(doc: GoogleDocument): string {
     }
 
     const para = element.paragraph;
+
+    // ── Horizontal rule (em-dash paragraph pushed by MarkdownToGDocs) ─────────
+    if (isHorizontalRuleParagraph(para)) {
+      if (inCodeBlock) { lines.push('```'); lines.push(''); inCodeBlock = false; }
+      if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('');
+      lines.push('---');
+      prevWasList = false;
+      continue;
+    }
 
     // ── Code block paragraph (all runs are monospace) ─────────────────────────
     if (isCodeParagraph(para)) {
