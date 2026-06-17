@@ -47,6 +47,9 @@ export class SyncEngine {
   // docId → last known Drive revision string (populated on start)
   private syncedDocs: Map<string, string> = new Map();
 
+  // Listeners notified after each completed sync (receive the file path)
+  private syncListeners: Array<(path: string) => void> = [];
+
   constructor(
     private plugin: PluginWithSettings,
     private api: GoogleDocsAPI,
@@ -101,6 +104,32 @@ export class SyncEngine {
   /** Returns a map of folderId → error message for folder mappings currently failing. */
   getFolderErrors(): Map<string, string> {
     return this.folderPoller.getFolderErrors();
+  }
+
+  /**
+   * Register a listener called after each completed sync with the file path.
+   * Returns an unsubscribe function.
+   */
+  addSyncListener(fn: (path: string) => void): () => void {
+    this.syncListeners.push(fn);
+    return () => {
+      this.syncListeners = this.syncListeners.filter((f) => f !== fn);
+    };
+  }
+
+  private notifySyncListeners(path: string): void {
+    this.syncListeners.forEach((fn) => fn(path));
+  }
+
+  /**
+   * Find the local TFile whose gdocs-id frontmatter matches the given docId.
+   * Used by the FileCommandBar to locate the file after a remote→local sync.
+   */
+  getFileByDocId(docId: string): TFile | undefined {
+    return this.plugin.app.vault.getMarkdownFiles().find((f) => {
+      const cache = this.plugin.app.metadataCache.getFileCache(f);
+      return cache?.frontmatter?.['gdocs-id'] === docId;
+    });
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -221,6 +250,8 @@ export class SyncEngine {
         lastSyncAt: new Date().toISOString(),
         lastSyncHash: hash,
       });
+
+      this.notifySyncListeners(file.path);
     } catch (err) {
       new Notice(`⚠ GDocs Sync: Failed to sync "${file.basename}" to Google Docs`);
       console.error('[SyncEngine] syncLocalToRemote error:', err);
@@ -301,6 +332,8 @@ export class SyncEngine {
         lastSyncAt: new Date().toISOString(),
         lastSyncHash: hash,
       });
+
+      this.notifySyncListeners(file.path);
     } catch (err) {
       console.error(`[SyncEngine] syncRemoteToLocal error for ${docId}:`, err);
       new Notice(`⚠ GDocs Sync: Failed to pull changes for doc ${docId}`);
