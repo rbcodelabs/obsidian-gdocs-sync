@@ -75,3 +75,181 @@
   display: flex;
   justify-content: flex-end;
 }
+
+/* ─── File Command Bar ──────────────────────────────────────────────────────── */
+
+.gdocs-command-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 14px;
+  min-height: 30px;
+  flex-shrink: 0;
+  background: var(--background-secondary);
+  border-bottom: 1px solid var(--background-modifier-border);
+  font-size: var(--font-ui-small);
+  user-select: none;
+  -webkit-user-select: none;
+  position: relative;
+}
+
+/* Dirty state: amber left accent */
+.gdocs-command-bar.is-dirty {
+  background: var(--background-secondary);
+  border-left: 3px solid var(--color-orange, #e8a029);
+  border-bottom-color: var(--background-modifier-border);
+}
+
+/* Error state: red tint */
+.gdocs-command-bar.is-error {
+  background: var(--background-modifier-error-hover, rgba(220, 38, 38, 0.07));
+  border-left: 3px solid var(--color-red, #dc2626);
+  border-bottom-color: transparent;
+}
+
+/* Syncing state: slightly muted */
+.gdocs-command-bar.is-syncing {
+  opacity: 0.8;
+}
+
+/* Left section */
+.gdocs-bar-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  flex: 1;
+  min-width: 0;
+}
+
+.gdocs-bar-icon {
+  flex-shrink: 0;
+  font-size: 0.85em;
+  line-height: 1;
+}
+
+/* Clean state: green icon */
+.gdocs-command-bar:not(.is-dirty):not(.is-error):not(.is-syncing) .gdocs-bar-icon {
+  color: var(--color-green, #16a34a);
+}
+
+/* Dirty state: orange icon */
+.gdocs-command-bar.is-dirty .gdocs-bar-icon {
+  color: var(--color-orange, #e8a029);
+}
+
+/* Error state: red icon */
+.gdocs-command-bar.is-error .gdocs-bar-icon {
+  color: var(--text-error);
+}
+
+/* Syncing state: muted icon */
+.gdocs-command-bar.is-syncing .gdocs-bar-icon {
+  color: var(--text-muted);
+}
+
+.gdocs-bar-name {
+  font-weight: 600;
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+/* Clickable doc-link pill */
+.gdocs-bar-doc-pill {
+  flex-shrink: 0;
+  color: var(--text-faint);
+  background: var(--background-modifier-border);
+  padding: 1px 7px;
+  border-radius: 9px;
+  white-space: nowrap;
+  font-size: 0.85em;
+  border: none;
+  box-shadow: none;
+  height: auto;
+  line-height: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gdocs-bar-doc-pill:hover {
+  color: var(--text-normal);
+  background: var(--background-modifier-hover);
+}
+
+.gdocs-bar-status-label {
+  flex-shrink: 0;
+  font-style: italic;
+}
+
+.gdocs-bar-status-label.is-clean {
+  color: var(--text-faint);
+}
+
+.gdocs-bar-status-label.is-dirty {
+  color: var(--color-orange, #e8a029);
+}
+
+.gdocs-bar-status-label.is-syncing {
+  color: var(--text-muted);
+}
+
+.gdocs-bar-status-label.is-error {
+  color: var(--text-error);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+  cursor: help;
+}
+
+/* Right section */
+.gdocs-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+}
+
+.gdocs-bar-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  height: 22px;
+  background: var(--interactive-normal);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  cursor: pointer;
+  font-size: var(--font-ui-smaller, 11px);
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background 80ms ease;
+}
+
+.gdocs-bar-btn:hover:not(:disabled) {
+  background: var(--interactive-hover);
+}
+
+.gdocs-bar-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Highlighted push button when file has local edits */
+.gdocs-bar-btn.is-cta {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.gdocs-bar-btn.is-cta:hover:not(:disabled) {
+  background: var(--interactive-accent-hover, var(--interactive-accent));
+  filter: brightness(1.08);
+}

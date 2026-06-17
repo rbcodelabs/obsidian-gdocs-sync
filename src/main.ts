@@ -5,6 +5,7 @@ import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { SyncEngine } from './sync/SyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
+import { FileCommandBar } from './ui/FileCommandBar';
 import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
@@ -19,7 +20,10 @@ export default class GDocsPlugin extends Plugin {
   api!: GoogleDocsAPI;
   syncEngine!: SyncEngine;
   statusBar!: StatusBarItem;
+  fileCommandBar!: FileCommandBar;
   settingsTab!: GDocsSettingTab;
+  /** Per-file error messages populated on push/pull failure, read by FileCommandBar */
+  perFileErrors: Map<string, string> = new Map();
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -31,6 +35,13 @@ export default class GDocsPlugin extends Plugin {
     this.syncEngine = new SyncEngine(this, this.api, this.tokenStore);
     this.statusBar = new StatusBarItem(this, () => {
       new SyncStatusModal(this.app, this as unknown as GDocsPluginInterface).open();
+    });
+
+    this.fileCommandBar = new FileCommandBar(this);
+
+    // Refresh the file command bar whenever a sync completes
+    this.syncEngine.addSyncListener((path) => {
+      this.fileCommandBar.update(path);
     });
 
     // ── OAuth protocol handler — registered once here, persistent for plugin lifetime ──
@@ -79,6 +90,8 @@ export default class GDocsPlugin extends Plugin {
         try {
           await this.syncEngine.syncLocalToRemote(activeFile, true /* force */);
           this.statusBar.setSynced();
+          this.perFileErrors.delete(activeFile.path);
+          this.fileCommandBar.update(activeFile.path);
           new Notice(`✓ Synced "${activeFile.basename}" to Google Docs`);
         } catch (err) {
           const msg = (err as Error).message;
@@ -87,6 +100,8 @@ export default class GDocsPlugin extends Plugin {
           } else {
             this.statusBar.setError('sync failed');
           }
+          this.perFileErrors.set(activeFile.path, msg);
+          this.fileCommandBar.update(activeFile.path);
           new Notice(`⚠ Sync failed: ${msg}`);
         }
       },
@@ -114,6 +129,8 @@ export default class GDocsPlugin extends Plugin {
         try {
           await this.syncEngine.syncRemoteToLocal(docId, true /* forceRemote */);
           this.statusBar.setSynced();
+          this.perFileErrors.delete(activeFile.path);
+          this.fileCommandBar.update(activeFile.path);
           new Notice(`✓ Pulled latest "${activeFile.basename}" from Google Docs`);
         } catch (err) {
           const msg = (err as Error).message;
@@ -122,6 +139,8 @@ export default class GDocsPlugin extends Plugin {
           } else {
             this.statusBar.setError('pull failed');
           }
+          this.perFileErrors.set(activeFile.path, msg);
+          this.fileCommandBar.update(activeFile.path);
           new Notice(`⚠ Pull failed: ${msg}`);
         }
       },
@@ -247,6 +266,7 @@ export default class GDocsPlugin extends Plugin {
 
   onunload(): void {
     this.syncEngine?.stop();
+    this.fileCommandBar?.destroy();
     console.log('[GDocsPlugin] Unloaded');
   }
 
