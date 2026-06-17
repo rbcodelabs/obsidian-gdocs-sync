@@ -260,6 +260,89 @@ export class GoogleDocsAPI {
   }
 
   /**
+   * List comments on a Drive file, returning resolved and deleted flags for
+   * each comment. Used by ConflictDetector to find open comments before push.
+   */
+  async listComments(docId: string): Promise<Array<{ resolved: boolean; deleted: boolean }>> {
+    const token = await this.tokenStore.getValidAccessToken();
+    const url = `${DRIVE_BASE}/files/${docId}/comments?fields=comments(resolved,deleted)&pageSize=100`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Google Drive comments error ${response.status} ${response.statusText}: ${body}`,
+      );
+    }
+
+    const data = await response.json() as { comments?: Array<{ resolved: boolean; deleted: boolean }> };
+    return data.comments ?? [];
+  }
+
+  /**
+   * Upload HTML to replace the content of an existing Google Doc.
+   * Uses the Drive API multipart upload with mimeType conversion so that the
+   * HTML is parsed and stored natively as a Google Doc (not an HTML file).
+   */
+  async uploadHtml(docId: string, html: string): Promise<void> {
+    const token = await this.tokenStore.getValidAccessToken();
+    const boundary = `gdocs_sync_boundary_${Date.now()}`;
+
+    const metadata = JSON.stringify({ mimeType: 'application/vnd.google-apps.document' });
+    const body = [
+      `--${boundary}`,
+      'Content-Type: application/json; charset=UTF-8',
+      '',
+      metadata,
+      `--${boundary}`,
+      'Content-Type: text/html; charset=UTF-8',
+      '',
+      html,
+      `--${boundary}--`,
+    ].join('\r\n');
+
+    const url = `https://www.googleapis.com/upload/drive/v3/files/${docId}?uploadType=multipart&convert=true`;
+    const response = await fetch(url, {
+      method: 'PATCH',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body,
+    });
+
+    if (!response.ok) {
+      const responseBody = await response.text();
+      throw new Error(
+        `Google Drive HTML upload error ${response.status} ${response.statusText}: ${responseBody}`,
+      );
+    }
+  }
+
+  /**
+   * Export a Google Doc as a ZIP file containing HTML and any embedded images.
+   * Returns the raw ArrayBuffer of the ZIP — use fflate.unzipSync to extract.
+   */
+  async exportAsZip(docId: string): Promise<ArrayBuffer> {
+    const token = await this.tokenStore.getValidAccessToken();
+    const url = `${DRIVE_BASE}/files/${docId}/export?mimeType=application%2Fzip`;
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      const body = await response.text();
+      throw new Error(
+        `Google Drive ZIP export error ${response.status} ${response.statusText}: ${body}`,
+      );
+    }
+
+    return response.arrayBuffer();
+  }
+
+  /**
    * Replaces all body content in a document.
    *
    * Strategy: insert a newline at index 1 to ensure there is at least one

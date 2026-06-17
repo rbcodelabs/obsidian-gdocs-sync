@@ -1,4 +1,5 @@
 import { Plugin, TFile, Notice } from 'obsidian';
+import { unzipSync } from 'fflate';
 import { GDocsPluginSettings, FolderMapping, SyncMeta } from '../types';
 import { GoogleDocsAPI } from '../api/GoogleDocsAPI';
 import { TokenStore } from '../auth/TokenStore';
@@ -8,6 +9,9 @@ import { FolderPoller } from './FolderPoller';
 import { ConflictResolver } from './ConflictResolver';
 import { htmlToMarkdown, extractDocTitle } from '../converter/HtmlToMarkdown';
 import { markdownToGDocsRequests } from '../converter/MarkdownToGDocs';
+import { markdownToHtml } from '../converter/MarkdownToHtml';
+import { detectConflicts } from './ConflictDetector';
+import { PushModeModal, PushMode } from '../ui/PushModeModal';
 
 type PluginWithSettings = Plugin & {
   settings: GDocsPluginSettings;
@@ -33,6 +37,33 @@ export function stripFrontmatter(content: string): string {
 export function parseDocId(urlOrId: string): string {
   const urlMatch = urlOrId.match(/\/document\/d\/([a-zA-Z0-9_-]+)/);
   return urlMatch ? urlMatch[1] : urlOrId.trim();
+}
+
+/**
+ * Rewrite <img src="..."> attributes in the HTML export so that image
+ * filenames point to the vault images folder. This ensures that when
+ * htmlToMarkdown converts the img tags, it emits vault-relative paths.
+ *
+ * @param html              Raw HTML from the ZIP export.
+ * @param imagesFolderName  Name of the folder where images were saved, e.g. "My Note-images".
+ * @param imageEntries      ZIP entry names for the images found in the zip.
+ */
+function rewriteImageSrcs(html: string, imagesFolderName: string, imageEntries: string[]): string {
+  // Build a set of just the filenames (no subfolder prefix from the zip)
+  const filenameSet = new Set(
+    imageEntries.map((name) =>
+      name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name,
+    ),
+  );
+
+  // Replace src="<filename>" or src="<path>/<filename>" with the vault images path
+  return html.replace(/(<img[^>]+src=")([^"]+)(")/gi, (_match, prefix, src, suffix) => {
+    const filename = src.includes('/') ? src.slice(src.lastIndexOf('/') + 1) : src;
+    if (filenameSet.has(filename)) {
+      return `${prefix}${imagesFolderName}/${filename}${suffix}`;
+    }
+    return _match;
+  });
 }
 
 export class SyncEngine {
@@ -234,10 +265,39 @@ export class SyncEngine {
     if (!force && lastHash && lastHash === hash) return;
 
     try {
-      await this.api.clearDocument(docId);
-      const requests = markdownToGDocsRequests(bodyContent);
-      if (requests.length > 0) {
-        await this.api.batchUpdate(docId, requests);
+      // Determine push mode. For a manual (forced) push on an existing doc,
+      // detect conflicts and offer the user a choice if any are found.
+      // Auto-save pushes always use HTML without showing a modal.
+      let pushMode: PushMode = 'html';
+
+      if (force) {
+        const conflicts = await detectConflicts(this.api, docId);
+        if (conflicts.comments > 0 || conflicts.suggestions > 0) {
+          pushMode = await new Promise<PushMode>((resolve) => {
+            new PushModeModal(
+              this.plugin.app,
+              conflicts.comments,
+              conflicts.suggestions,
+              resolve,
+            ).open();
+          });
+        }
+      }
+
+
+      if (pushMode === 'surgical') {
+        // Surgical path: preserves comments and suggestions, no image support
+        await this.api.clearDocument(docId);
+        const requests = markdownToGDocsRequests(bodyContent);
+        if (requests.length > 0) {
+          await this.api.batchUpdate(docId, requests);
+        }
+      } else {
+        // HTML path: full formatting + images (default for all auto-saves and
+        // manual pushes on clean docs or when user chose HTML)
+        const noteFolder = file.parent?.path ?? '';
+        const html = await markdownToHtml(bodyContent, this.plugin.app, noteFolder);
+        await this.api.uploadHtml(docId, html);
       }
 
       // Record updated revision so the poller doesn't immediately fire back
@@ -293,52 +353,123 @@ export class SyncEngine {
     }
 
     try {
-      const html = await this.api.exportAsHtml(docId);
-      const remoteMarkdown = htmlToMarkdown(html);
+      // Export the document as a ZIP containing HTML + image files
+      const zipBuffer = await this.api.exportAsZip(docId);
+      const zipData = new Uint8Array(zipBuffer);
+      const entries = unzipSync(zipData);
 
-      if (!forceRemote) {
-        // Hash-based conflict detection: check whether local content has changed
-        // since the last sync. Timestamp comparison is unreliable because
-        // updateFrontmatter touches the file on every push, keeping mtime fresh.
-        const rawContent = await this.plugin.app.vault.read(file);
-        const localBodyContent = stripFrontmatter(rawContent);
-        const localHash = await sha256(localBodyContent);
-        const meta = this.plugin.app.metadataCache.getFileCache(file);
-        const lastSyncHash: string | undefined = meta?.frontmatter?.['gdocs-hash'];
-
-        if (lastSyncHash && localHash !== lastSyncHash) {
-          // Local was edited since the last sync — treat local as authoritative
-          // to avoid silently clobbering the user's work. Push local to remote.
-          console.log(`[SyncEngine] Conflict on ${file.path}: local edited since last sync. Local wins.`);
-          await this.syncLocalToRemote(file);
-          return;
-        }
-        // If hashes match (or no prior hash), local is unchanged — remote wins.
+      // Find the HTML file in the zip (typically "<title>.html")
+      const htmlEntry = Object.keys(entries).find((name) => name.endsWith('.html'));
+      if (!htmlEntry) {
+        throw new Error(`ZIP export for doc ${docId} contained no HTML file`);
       }
 
-      // Remote wins — overwrite local body content, preserving frontmatter
-      const rawContent = await this.plugin.app.vault.read(file);
-      const frontmatterMatch = rawContent.match(/^(---\n[\s\S]*?\n---\n?)/);
-      const existingFrontmatter = frontmatterMatch ? frontmatterMatch[1] : '';
+      const htmlBytes = entries[htmlEntry];
+      const html = new TextDecoder().decode(htmlBytes);
 
-      const newContent = existingFrontmatter
-        ? existingFrontmatter + remoteMarkdown
-        : remoteMarkdown;
-
-      await this.plugin.app.vault.modify(file, newContent);
-
-      const hash = await sha256(remoteMarkdown);
-      await this.updateFrontmatter(file, {
-        lastSyncAt: new Date().toISOString(),
-        lastSyncHash: hash,
+      // Extract all image files from the ZIP
+      const imageExtensions = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp']);
+      const imageEntries = Object.keys(entries).filter((name) => {
+        const lower = name.toLowerCase();
+        return imageExtensions.has(lower.slice(lower.lastIndexOf('.')));
       });
 
-      this.notifySyncListeners(file.path);
+      // Write images to a sibling folder: {note-basename}-images/{filename}
+      if (imageEntries.length > 0) {
+        const noteFolder = file.parent?.path ?? '';
+        const imagesFolderName = `${file.basename}-images`;
+        const imagesFolderPath = noteFolder
+          ? `${noteFolder}/${imagesFolderName}`
+          : imagesFolderName;
+
+        // Create the images folder if it doesn't exist
+        if (!this.plugin.app.vault.getFolderByPath(imagesFolderPath)) {
+          await this.plugin.app.vault.createFolder(imagesFolderPath);
+        }
+
+        for (const imageName of imageEntries) {
+          // Use just the filename part, strip any subfolder prefix from the zip entry
+          const filename = imageName.includes('/')
+            ? imageName.slice(imageName.lastIndexOf('/') + 1)
+            : imageName;
+          const imagePath = `${imagesFolderPath}/${filename}`;
+          const imageBytes = entries[imageName];
+
+          const existingFile = this.plugin.app.vault.getFileByPath(imagePath);
+          if (existingFile) {
+            await this.plugin.app.vault.modifyBinary(existingFile as TFile, imageBytes.buffer as ArrayBuffer);
+          } else {
+            await this.plugin.app.vault.createBinary(imagePath, imageBytes.buffer as ArrayBuffer);
+          }
+        }
+
+        // Rewrite img src attributes in the HTML so that htmlToMarkdown emits
+        // wikilinks pointing to the vault images folder instead of raw filenames.
+        // This post-processes the HTML before markdown conversion.
+        const rewrittenHtml = rewriteImageSrcs(html, imagesFolderName, imageEntries);
+        const remoteMarkdown = htmlToMarkdown(rewrittenHtml);
+        await this.writeRemoteContent(file, docId, remoteMarkdown, forceRemote);
+        return;
+      }
+
+      const remoteMarkdown = htmlToMarkdown(html);
+      await this.writeRemoteContent(file, docId, remoteMarkdown, forceRemote);
     } catch (err) {
       console.error(`[SyncEngine] syncRemoteToLocal error for ${docId}:`, err);
       new Notice(`⚠ GDocs Sync: Failed to pull changes for doc ${docId}`);
       throw err;
     }
+  }
+
+  /**
+   * Write remote markdown content to the local file, applying conflict
+   * detection and frontmatter preservation. Extracted to avoid duplication
+   * between the image and no-image paths in _syncRemoteToLocal.
+   */
+  private async writeRemoteContent(
+    file: TFile,
+    docId: string,
+    remoteMarkdown: string,
+    forceRemote: boolean,
+  ): Promise<void> {
+    if (!forceRemote) {
+      // Hash-based conflict detection: check whether local content has changed
+      // since the last sync. Timestamp comparison is unreliable because
+      // updateFrontmatter touches the file on every push, keeping mtime fresh.
+      const rawContent = await this.plugin.app.vault.read(file);
+      const localBodyContent = stripFrontmatter(rawContent);
+      const localHash = await sha256(localBodyContent);
+      const meta = this.plugin.app.metadataCache.getFileCache(file);
+      const lastSyncHash: string | undefined = meta?.frontmatter?.['gdocs-hash'];
+
+      if (lastSyncHash && localHash !== lastSyncHash) {
+        // Local was edited since the last sync — treat local as authoritative
+        // to avoid silently clobbering the user's work. Push local to remote.
+        console.log(`[SyncEngine] Conflict on ${file.path}: local edited since last sync. Local wins.`);
+        await this.syncLocalToRemote(file);
+        return;
+      }
+      // If hashes match (or no prior hash), local is unchanged — remote wins.
+    }
+
+    // Remote wins — overwrite local body content, preserving frontmatter
+    const rawContent = await this.plugin.app.vault.read(file);
+    const frontmatterMatch = rawContent.match(/^(---\n[\s\S]*?\n---\n?)/);
+    const existingFrontmatter = frontmatterMatch ? frontmatterMatch[1] : '';
+
+    const newContent = existingFrontmatter
+      ? existingFrontmatter + remoteMarkdown
+      : remoteMarkdown;
+
+    await this.plugin.app.vault.modify(file, newContent);
+
+    const hash = await sha256(remoteMarkdown);
+    await this.updateFrontmatter(file, {
+      lastSyncAt: new Date().toISOString(),
+      lastSyncHash: hash,
+    });
+
+    this.notifySyncListeners(file.path);
   }
 
   /**
