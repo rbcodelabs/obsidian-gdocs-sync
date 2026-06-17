@@ -125,6 +125,13 @@ export class FileCommandBar {
 	private renderBar(leaf: WorkspaceLeaf, leafId: string, file: TFile, docId: string): void {
 		let bar = this.bars.get(leafId);
 
+		// After a pull, Obsidian reloads the view DOM — the old bar element is
+		// detached. Discard it so we re-inject a fresh one below.
+		if (bar && !bar.isConnected) {
+			this.bars.delete(leafId);
+			bar = undefined;
+		}
+
 		if (!bar) {
 			// Insert the bar between .view-header and .view-content
 			const viewContent = leaf.view.containerEl.querySelector('.view-content');
