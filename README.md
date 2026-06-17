@@ -25,6 +25,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Import by URL** — pull an existing Google Doc into Obsidian via the command palette
 - **Drive folder import** — paste a Google Drive folder URL to import all Docs inside it (including subfolders) as notes, with the folder structure mirrored in your vault
 - **Automatic new-doc detection** — mapped Drive folders are polled every 5 minutes; new Docs added by anyone are imported automatically
+- **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
 
@@ -165,6 +166,7 @@ src/
     ConflictResolver.ts     Last-write-wins (v1)
   ui/
     StatusBar.ts            ⇅ GDocs status bar item
+    FileCommandBar.ts       Per-file command bar (sync status + Push/Pull/Open buttons)
     ImportModal.ts          Import a Google Doc by URL or ID
     FolderImportModal.ts    Import an entire Drive folder by URL
 ```
