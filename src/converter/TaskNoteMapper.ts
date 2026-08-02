@@ -2,19 +2,23 @@ import { GoogleTask, GoogleTaskList, TaskWriteFields } from '../api/GoogleTasksA
 
 // ─── Frontmatter keys ─────────────────────────────────────────────────────────
 // Centralised so the mapper, sync engine, and tests never drift on key spelling.
+// NOTE: underscores (not hyphens) are intentional — Obsidian Bases parses a
+// hyphen in a property reference as subtraction, so `gtasks_completed` works in
+// Base filters/formulas/groupBy where `gtasks-completed` would not. This matches
+// the existing Linear→Bases pipeline convention in the vault.
 export const FM = {
-  id: 'gtasks-id',
-  listId: 'gtasks-list-id',
-  listName: 'gtasks-list-name',
-  title: 'gtasks-title',
-  completed: 'gtasks-completed',
-  due: 'gtasks-due',
-  position: 'gtasks-position',
-  parentId: 'gtasks-parent-id',
-  updated: 'gtasks-updated',
-  hash: 'gtasks-hash',
-  url: 'gtasks-url',
-  deleted: 'gtasks-deleted',
+  id: 'gtasks_id',
+  listId: 'gtasks_list_id',
+  listName: 'gtasks_list_name',
+  title: 'gtasks_title',
+  completed: 'gtasks_completed',
+  due: 'gtasks_due',
+  position: 'gtasks_position',
+  parentId: 'gtasks_parent_id',
+  updated: 'gtasks_updated',
+  hash: 'gtasks_hash',
+  url: 'gtasks_url',
+  deleted: 'gtasks_deleted',
 } as const;
 
 /**
