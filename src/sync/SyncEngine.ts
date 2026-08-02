@@ -96,6 +96,15 @@ export class SyncEngine {
     return new Set(this.syncedDocs.keys());
   }
 
+  /**
+   * The shared file watcher. Exposed so the Tasks sync engine can register its
+   * own predicate-gated handler on the same watcher/debounce map rather than
+   * attaching a second independent 'modify' listener.
+   */
+  getFileWatcher(): FileWatcher {
+    return this.fileWatcher;
+  }
+
   /** Returns true if the given file path or docId is currently mid-sync. */
   isSyncing(key: string): boolean {
     return this.syncQueue.has(key);
