@@ -5,11 +5,14 @@ import {
   Setting,
   ButtonComponent,
   TextComponent,
+  Notice,
 } from 'obsidian';
 import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
+import { GoogleTasksAPI, GoogleTaskList } from './api/GoogleTasksAPI';
 import { SyncEngine } from './sync/SyncEngine';
+import { TasksSyncEngine } from './sync/TasksSyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 
@@ -19,8 +22,11 @@ export interface GDocsPluginInterface extends Plugin {
   saveSettings(): Promise<void>;
   auth: GoogleAuth;
   api: GoogleDocsAPI;
+  tasksApi: GoogleTasksAPI;
   syncEngine: SyncEngine;
+  tasksSyncEngine: TasksSyncEngine;
   statusBar: StatusBarItem;
+  startTasksSyncIfEnabled(): Promise<void>;
 }
 
 export class GDocsSettingTab extends PluginSettingTab {
@@ -184,6 +190,147 @@ export class GDocsSettingTab extends PluginSettingTab {
             await this.pluginInstance.saveSettings();
           });
       });
+
+    // ── Section 5: Google Tasks Sync ────────────────────────────────────────
+    containerEl.createEl('h2', { text: 'Google Tasks Sync' });
+    containerEl.createEl('p', {
+      text: 'Sync your Google Tasks into notes so you can browse and manage them ' +
+        'with an Obsidian Base (table/card view). Requires reconnecting your ' +
+        'Google account once to grant Tasks access.',
+      cls: 'setting-item-description',
+    });
+
+    new Setting(containerEl)
+      .setName('Enable Tasks sync')
+      .setDesc('Turn on two-way sync between Google Tasks and notes in the tasks folder.')
+      .addToggle((toggle) => {
+        toggle
+          .setValue(this.pluginInstance.settings.enableTasksSync)
+          .onChange(async (value) => {
+            this.pluginInstance.settings.enableTasksSync = value;
+            await this.pluginInstance.saveSettings();
+            if (value) {
+              await this.pluginInstance.startTasksSyncIfEnabled();
+            } else {
+              this.pluginInstance.tasksSyncEngine.stop();
+            }
+            this.display(); // re-render to show/hide dependent controls
+          });
+      });
+
+    // Only show the rest of the Tasks controls when the feature is enabled.
+    if (this.pluginInstance.settings.enableTasksSync) {
+      new Setting(containerEl)
+        .setName('Tasks folder')
+        .setDesc('Vault folder where synced task notes are stored. Keep this separate from any manual task notes.')
+        .addText((text: TextComponent) => {
+          text
+            .setPlaceholder('Google Tasks')
+            .setValue(this.pluginInstance.settings.tasksFolder)
+            .onChange(async (value) => {
+              this.pluginInstance.settings.tasksFolder = value.trim() || 'Google Tasks';
+              await this.pluginInstance.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Task lists to sync')
+        .setDesc('Choose which Google Tasks lists to sync. If none are selected, all lists sync.');
+
+      const listContainer = containerEl.createDiv('gtasks-list-selection');
+      void this.renderTaskListCheckboxes(listContainer);
+
+      new Setting(containerEl)
+        .setName('Tasks poll interval')
+        .setDesc('How often to check Google Tasks for remote changes.')
+        .addDropdown((dropdown) => {
+          dropdown
+            .addOption('30', 'Every 30 seconds')
+            .addOption('60', 'Every 60 seconds')
+            .addOption('120', 'Every 2 minutes')
+            .addOption('300', 'Every 5 minutes')
+            .setValue(String(this.pluginInstance.settings.tasksPollIntervalSeconds))
+            .onChange(async (value) => {
+              this.pluginInstance.settings.tasksPollIntervalSeconds = parseInt(value, 10);
+              await this.pluginInstance.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Import now')
+        .setDesc('Pull all tasks from the selected lists into the vault immediately.')
+        .addButton((btn: ButtonComponent) => {
+          btn
+            .setButtonText('Import all task lists')
+            .setCta()
+            .onClick(async () => {
+              btn.setButtonText('Importing…').setDisabled(true);
+              try {
+                const { imported, updated } =
+                  await this.pluginInstance.tasksSyncEngine.importAllLists();
+                new Notice(`✓ Google Tasks: ${imported} imported, ${updated} updated`);
+              } catch (err) {
+                new Notice(`⚠ Import failed: ${(err as Error).message}`);
+              } finally {
+                btn.setButtonText('Import all task lists').setDisabled(false);
+              }
+            });
+        });
+    }
+  }
+
+  /**
+   * Fetch the account's task lists and render a checkbox per list. Selection is
+   * stored in settings.syncedTaskListIds (empty array = sync all lists).
+   */
+  private async renderTaskListCheckboxes(container: HTMLElement): Promise<void> {
+    container.empty();
+    container.createEl('p', {
+      text: 'Loading task lists…',
+      cls: 'setting-item-description',
+    });
+
+    let lists: GoogleTaskList[];
+    try {
+      lists = await this.pluginInstance.tasksApi.listTaskLists();
+    } catch (err) {
+      container.empty();
+      container.createEl('p', {
+        text: `Could not load task lists: ${(err as Error).message}. ` +
+          'You may need to reconnect your Google account to grant Tasks access.',
+        cls: 'setting-item-description',
+      });
+      return;
+    }
+
+    container.empty();
+    if (lists.length === 0) {
+      container.createEl('p', {
+        text: 'No task lists found in your Google account.',
+        cls: 'setting-item-description',
+      });
+      return;
+    }
+
+    for (const list of lists) {
+      new Setting(container)
+        .setName(list.title)
+        .addToggle((toggle) => {
+          const selected = this.pluginInstance.settings.syncedTaskListIds;
+          toggle
+            .setValue(selected.includes(list.id))
+            .onChange(async (value) => {
+              const current = this.pluginInstance.settings.syncedTaskListIds;
+              if (value && !current.includes(list.id)) {
+                current.push(list.id);
+              } else if (!value) {
+                this.pluginInstance.settings.syncedTaskListIds =
+                  current.filter((id) => id !== list.id);
+              }
+              await this.pluginInstance.saveSettings();
+            });
+        });
+    }
   }
 
   private renderFolderMappings(container: HTMLElement): void {
