@@ -7,6 +7,22 @@ type PluginWithSettings = Plugin & {
   saveSettings(): Promise<void>;
 };
 
+export interface GeodeHostMarker {
+  name: 'geode';
+  protocolScheme: 'geode';
+}
+
+export function isGeodeHost(value: unknown): value is GeodeHostMarker {
+  if (!value || typeof value !== 'object') return false;
+  const host = value as Partial<GeodeHostMarker>;
+  return host.name === 'geode' && host.protocolScheme === 'geode';
+}
+
+export function buildConnectUrl(authProxyUrl: string, state: string, host: unknown): string {
+  const callback = isGeodeHost(host) ? '&callback_app=geode' : '';
+  return `${authProxyUrl}/api/auth/start?state=${encodeURIComponent(state)}${callback}`;
+}
+
 export class GoogleAuth {
   private plugin: PluginWithSettings;
   private tokenStore: TokenStore;
@@ -100,7 +116,8 @@ export class GoogleAuth {
     console.log('[GDocsAuth] connect() called. pendingState set to:', this.pendingState);
     console.log('[GDocsAuth] authProxyUrl:', this.plugin.settings.authProxyUrl);
 
-    const authUrl = `${this.plugin.settings.authProxyUrl}/api/auth/start?state=${encodeURIComponent(this.pendingState)}`;
+    const geodeHost = (window as unknown as { geode?: { host?: unknown } }).geode?.host;
+    const authUrl = buildConnectUrl(this.plugin.settings.authProxyUrl, this.pendingState, geodeHost);
     console.log('[GDocsAuth] Opening auth URL:', authUrl);
     // Use Electron's shell.openExternal so the URL opens in the user's default
     // browser with their normal profile — window.open() hands off to Chrome

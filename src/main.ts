@@ -58,8 +58,8 @@ export default class GDocsPlugin extends Plugin {
     });
 
     // ── OAuth protocol handler — registered once here, persistent for plugin lifetime ──
-    // Handles obsidian://gdocs-sync?action=auth_complete&... redirects from the proxy.
-    console.log('[GDocsPlugin] Registering obsidian://gdocs-sync protocol handler...');
+    // Handles obsidian://gdocs-sync in Obsidian and geode://gdocs-sync in Geode.
+    console.log('[GDocsPlugin] Registering gdocs-sync protocol handler...');
     this.registerObsidianProtocolHandler('gdocs-sync', async (params) => {
       console.log('[GDocsPlugin] Protocol handler fired! Raw params:', JSON.stringify(params));
       await this.auth.handleCallback(params);
