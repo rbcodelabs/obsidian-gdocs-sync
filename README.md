@@ -73,7 +73,7 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 
 1. **Settings → Google Docs Sync**
 2. Confirm the **Auth Proxy URL** is `https://obsidian-gdocs-auth.vercel.app`
-3. Click **Connect Google Account** — a browser window opens, you authorize, Obsidian reopens automatically
+3. Click **Connect Google Account** — a browser window opens, you authorize, and Obsidian or Geode reopens automatically
 4. Settings should show your Google email as connected
 
 ### 4. Start syncing
@@ -97,6 +97,10 @@ npm run build
 ```
 
 Output: `main.js` in the project root (the file Obsidian loads).
+
+## Geode compatibility
+
+When hosted by Geode, the plugin detects the explicit `window.geode.host` marker and asks the auth proxy to return through `geode://gdocs-sync`. In Obsidian the existing `obsidian://gdocs-sync` flow is unchanged.
 
 **Requirements:** Node 18+, TypeScript 5.x
 
