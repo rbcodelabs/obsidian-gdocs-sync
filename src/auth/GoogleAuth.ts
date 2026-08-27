@@ -1,4 +1,5 @@
-import { Plugin, Notice } from 'obsidian';
+import { Plugin, Notice, requestUrl } from 'obsidian';
+import { isSuccessStatus } from '../api/httpStatus';
 import { GDocsPluginSettings, GDocsTokens } from '../types';
 import { TokenStore } from './TokenStore';
 
@@ -90,11 +91,13 @@ export class GoogleAuth {
 
     // Fetch the Google account email for display in settings
     try {
-      const resp = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+      const resp = await requestUrl({
+        url: 'https://www.googleapis.com/oauth2/v3/userinfo',
         headers: { Authorization: `Bearer ${accessToken}` },
+        throw: false,
       });
-      if (resp.ok) {
-        const info = await resp.json() as { email?: string };
+      if (isSuccessStatus(resp.status)) {
+        const info = resp.json as { email?: string };
         if (info.email) {
           this.plugin.settings.connectedEmail = info.email;
           await this.plugin.saveSettings();

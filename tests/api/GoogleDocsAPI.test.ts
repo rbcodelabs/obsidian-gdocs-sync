@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { GoogleDocsAPI } from '../../src/api/GoogleDocsAPI';
+import { requestUrl } from 'obsidian';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -12,38 +13,35 @@ function makeApi(token = 'test-token'): GoogleDocsAPI {
 // ─── exportAsHtml ─────────────────────────────────────────────────────────────
 
 describe('GoogleDocsAPI.exportAsHtml', () => {
-  let fetchSpy: ReturnType<typeof vi.fn>;
+  const requestUrlMock = vi.mocked(requestUrl);
 
   beforeEach(() => {
-    fetchSpy = vi.fn();
-    vi.stubGlobal('fetch', fetchSpy);
+    requestUrlMock.mockReset();
   });
 
   afterEach(() => {
-    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it('calls the Drive export endpoint with the correct mimeType', async () => {
-    fetchSpy.mockResolvedValue({
-      ok: true,
-      text: async () => '<html><body><p>Hello</p></body></html>',
-    });
+    requestUrlMock.mockResolvedValue({ status: 200, text: '<html><body><p>Hello</p></body></html>' } as never);
 
     const api = makeApi('my-token');
     await api.exportAsHtml('doc123');
 
-    expect(fetchSpy).toHaveBeenCalledOnce();
-    const [url, init] = fetchSpy.mock.calls[0];
-    expect(url).toContain('/files/doc123/export');
-    expect(url).toContain('mimeType=text%2Fhtml');
-    expect((init as RequestInit).headers).toMatchObject({
+    expect(requestUrlMock).toHaveBeenCalledOnce();
+    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(request.url).toContain('/files/doc123/export');
+    expect(request.url).toContain('mimeType=text%2Fhtml');
+    expect(request.headers).toMatchObject({
       Authorization: 'Bearer my-token',
     });
+    expect(request.throw).toBe(false);
   });
 
   it('returns the raw HTML string from the response body', async () => {
     const html = '<html><body><h1>My Doc</h1><p>Content</p></body></html>';
-    fetchSpy.mockResolvedValue({ ok: true, text: async () => html });
+    requestUrlMock.mockResolvedValue({ status: 200, text: html } as never);
 
     const api = makeApi();
     const result = await api.exportAsHtml('docABC');
@@ -52,12 +50,10 @@ describe('GoogleDocsAPI.exportAsHtml', () => {
   });
 
   it('throws a descriptive error on a non-ok response', async () => {
-    fetchSpy.mockResolvedValue({
-      ok: false,
+    requestUrlMock.mockResolvedValue({
       status: 403,
-      statusText: 'Forbidden',
-      text: async () => '{"error":{"message":"Access denied."}}',
-    });
+      text: '{"error":{"message":"Access denied."}}',
+    } as never);
 
     const api = makeApi();
     await expect(api.exportAsHtml('docXYZ')).rejects.toThrow(
@@ -72,7 +68,31 @@ describe('GoogleDocsAPI.exportAsHtml', () => {
     const api = new GoogleDocsAPI(tokenStore);
 
     await expect(api.exportAsHtml('docXYZ')).rejects.toThrow('No valid token');
-    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(requestUrlMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('GoogleDocsAPI requests', () => {
+  const requestUrlMock = vi.mocked(requestUrl);
+
+  beforeEach(() => requestUrlMock.mockReset());
+
+  it('uses requestUrl and returns its parsed JSON payload', async () => {
+    const document = { documentId: 'doc1', title: 'Doc', body: { content: [] }, revisionId: 'r1' };
+    requestUrlMock.mockResolvedValue({ status: 200, json: document, text: JSON.stringify(document) } as never);
+
+    await expect(makeApi().getDocument('doc1')).resolves.toEqual(document);
+    expect(requestUrlMock).toHaveBeenCalledWith(expect.objectContaining({
+      url: expect.stringContaining('/documents/doc1'),
+      throw: false,
+    }));
+  });
+
+  it('preserves descriptive non-2xx errors', async () => {
+    requestUrlMock.mockResolvedValue({ status: 500, text: 'boom' } as never);
+    await expect(makeApi().getDocument('doc1')).rejects.toThrow(
+      'Google API error 500 Internal Server Error: boom',
+    );
   });
 });
 

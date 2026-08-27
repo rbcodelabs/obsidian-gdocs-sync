@@ -1,5 +1,7 @@
 import { TokenStore } from '../auth/TokenStore';
 import { DriveItem } from '../types';
+import { requestUrl } from 'obsidian';
+import { headerRecord, isSuccessStatus, statusText } from './httpStatus';
 
 // ─── Google Docs / Drive type definitions ────────────────────────────────────
 
@@ -94,22 +96,24 @@ export class GoogleDocsAPI {
     options: RequestInit = {},
   ): Promise<T> {
     const headers = await this.authHeaders();
-    const response = await fetch(url, {
-      ...options,
-      headers: { ...headers, ...(options.headers ?? {}) },
+    const response = await requestUrl({
+      url,
+      method: options.method,
+      body: options.body as string | ArrayBuffer | undefined,
+      headers: { ...headerRecord(headers), ...headerRecord(options.headers) },
+      throw: false,
     });
 
-    if (!response.ok) {
-      const body = await response.text();
+    if (!isSuccessStatus(response.status)) {
       throw new Error(
-        `Google API error ${response.status} ${response.statusText}: ${body}`,
+        `Google API error ${response.status} ${statusText(response.status)}: ${response.text}`,
       );
     }
 
     // 204 No Content — nothing to parse
     if (response.status === 204) return undefined as unknown as T;
 
-    return response.json() as Promise<T>;
+    return response.json as T;
   }
 
   /**
@@ -128,16 +132,17 @@ export class GoogleDocsAPI {
   async exportAsHtml(docId: string): Promise<string> {
     const token = await this.tokenStore.getValidAccessToken();
     const url = `${DRIVE_BASE}/files/${docId}/export?mimeType=text%2Fhtml`;
-    const response = await fetch(url, {
+    const response = await requestUrl({
+      url,
       headers: { Authorization: `Bearer ${token}` },
+      throw: false,
     });
-    if (!response.ok) {
-      const body = await response.text();
+    if (!isSuccessStatus(response.status)) {
       throw new Error(
-        `Google Drive export error ${response.status} ${response.statusText}: ${body}`,
+        `Google Drive export error ${response.status} ${statusText(response.status)}: ${response.text}`,
       );
     }
-    return response.text();
+    return response.text;
   }
 
   /**
