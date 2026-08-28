@@ -1,9 +1,12 @@
+import { vi } from 'vitest';
+
 // Minimal mock of the Obsidian API for unit tests.
 // Only stubs the symbols actually imported by the files under test.
 export class Notice {
   constructor(public message: string) {}
 }
 export class Plugin {}
+export const requestUrl = vi.fn();
 export class Modal {
   constructor(public app: unknown) {}
   open() {}

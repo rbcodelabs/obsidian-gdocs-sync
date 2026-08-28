@@ -1,4 +1,5 @@
-import { Plugin } from 'obsidian';
+import { Plugin, requestUrl } from 'obsidian';
+import { isSuccessStatus } from '../api/httpStatus';
 import { GDocsTokens, GDocsPluginSettings } from '../types';
 
 // Extend Plugin type to include the settings and saveSettings we expect
@@ -49,19 +50,22 @@ export class TokenStore {
 
     // Token is expired or about to expire — refresh it via the auth proxy
     const refreshUrl = `${this.plugin.settings.authProxyUrl}/api/auth/refresh`;
-    const response = await fetch(refreshUrl, {
+    const response = await requestUrl({
+      url: refreshUrl,
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ refresh_token: tokens.refreshToken }),
+      throw: false,
     });
 
-    if (!response.ok) {
+    if (!isSuccessStatus(response.status)) {
       // The proxy forwards Google's machine-readable error code as JSON
       // { error: "invalid_grant" | "refresh_failed" | ... }.
       let errorCode = 'refresh_failed';
       try {
-        const errBody = await response.json() as { error?: string };
-        if (errBody.error) errorCode = errBody.error;
+        const errBody = response.json as { error?: string } | undefined;
+        if (errBody?.error) errorCode = errBody.error;
+        else errorCode = `http_${response.status}`;
       } catch {
         // Body wasn't JSON — fall back to the status code.
         errorCode = `http_${response.status}`;
@@ -80,7 +84,7 @@ export class TokenStore {
       throw new Error(`Token refresh failed [${errorCode}]`);
     }
 
-    const data = await response.json() as {
+    const data = response.json as {
       access_token: string;
       refresh_token?: string;
       expires_in: number;

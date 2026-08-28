@@ -1,4 +1,6 @@
 import { TokenStore } from '../auth/TokenStore';
+import { requestUrl } from 'obsidian';
+import { headerRecord, isSuccessStatus, statusText } from './httpStatus';
 
 // ─── Google Tasks API type definitions ───────────────────────────────────────
 // @see https://developers.google.com/tasks/reference/rest
@@ -93,16 +95,21 @@ export class GoogleTasksAPI {
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       const headers = await this.authHeaders();
-      const response = await fetch(url, {
-        ...options,
-        headers: { ...headers, ...(options.headers ?? {}) },
+      const response = await requestUrl({
+        url,
+        method: options.method,
+        body: options.body as string | ArrayBuffer | undefined,
+        headers: { ...headerRecord(headers), ...headerRecord(options.headers) },
+        throw: false,
       });
 
       if (response.status === 429) {
         // Rate limited — honour Retry-After if present, else exponential backoff.
         lastError = new Error('Google Tasks API rate limit (429)');
         if (attempt < MAX_RETRIES) {
-          const retryAfter = Number(response.headers?.get?.('Retry-After'));
+          const retryAfterHeader = Object.entries(response.headers ?? {})
+            .find(([name]) => name.toLowerCase() === 'retry-after')?.[1];
+          const retryAfter = Number(retryAfterHeader);
           const delay = Number.isFinite(retryAfter) && retryAfter > 0
             ? retryAfter * 1000
             : BASE_BACKOFF_MS * 2 ** attempt;
@@ -113,23 +120,21 @@ export class GoogleTasksAPI {
       }
 
       if (response.status === 403) {
-        const body = await response.text();
         throw new TasksScopeError(
           `Google Tasks API returned 403 (Forbidden). Reconnect your Google ` +
-            `account in plugin settings to grant Tasks access. Details: ${body}`,
+            `account in plugin settings to grant Tasks access. Details: ${response.text}`,
         );
       }
 
-      if (!response.ok) {
-        const body = await response.text();
+      if (!isSuccessStatus(response.status)) {
         throw new Error(
-          `Google Tasks API error ${response.status} ${response.statusText}: ${body}`,
+          `Google Tasks API error ${response.status} ${statusText(response.status)}: ${response.text}`,
         );
       }
 
       // 204 No Content — e.g. DELETE — nothing to parse.
       if (response.status === 204) return undefined as unknown as T;
-      return response.json() as Promise<T>;
+      return response.json as T;
     }
 
     // Exhausted retries (only reachable on repeated 429s).
