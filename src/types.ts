@@ -53,6 +53,7 @@ export interface GDocsPluginSettings {
   autoSyncOnSave: boolean;
   tokens: GDocsTokens | null;
   connectedEmail: string;     // Google account email shown in settings
+  fullVaultRootFolderId: string;
   // ── Google Tasks sync ──
   enableTasksSync: boolean;      // master toggle for the Tasks sync feature
   tasksFolder: string;           // vault folder for synced task notes, e.g. "Google Tasks"
@@ -69,6 +70,7 @@ export const DEFAULT_SETTINGS: GDocsPluginSettings = {
   autoSyncOnSave: true,
   tokens: null,
   connectedEmail: '',
+  fullVaultRootFolderId: '',
   enableTasksSync: false,
   tasksFolder: 'Google Tasks',
   syncedTaskListIds: [],

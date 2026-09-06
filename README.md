@@ -28,6 +28,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
+- **Geode full-vault transport (preview)** — raw byte-preserving Google Drive files and folders behind Geode's host-owned sync framework; separate from native Google Docs note links
 
 ---
 
@@ -81,6 +82,14 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 - Add the `gdocs-sync` tag to any note, **or**
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
+
+### Geode full-vault sync
+
+When loaded in Geode, the plugin also attempts to register a distinct **Google Drive (full vault)** transport. Geode—not this plugin—owns the initial preview, selective scope, journal, conflicts, and recoverable-delete policy. The transport creates a dedicated **Geode Vault** folder using the existing narrow `drive.file` OAuth scope and stores files as their original bytes.
+
+Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider reports `conditionalWrites: false`, so current Geode builds reject activation rather than risking a lost update. The settings page explains this fail-closed state. Native Google Docs and Google Tasks syncing remain available independently.
+
+OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
 
 ---
 
@@ -168,6 +177,7 @@ src/
     GDocsPoller.ts          setInterval revision check → SyncEngine
     FolderPoller.ts         Every 5min — checks mapped Drive folders for new docs
     ConflictResolver.ts     Last-write-wins (v1)
+    GoogleDriveSyncProvider.ts  Geode full-vault Drive byte transport (desktop, fail-closed without atomic preconditions)
   ui/
     StatusBar.ts            ⇅ GDocs status bar item
     FileCommandBar.ts       Per-file command bar (sync status + Push/Pull/Open buttons)

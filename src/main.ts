@@ -12,6 +12,7 @@ import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
+import { GoogleDriveSyncProvider } from './sync/GoogleDriveSyncProvider';
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -28,12 +29,19 @@ export default class GDocsPlugin extends Plugin {
   settingsTab!: GDocsSettingTab;
   /** Per-file error messages populated on push/pull failure, read by FileCommandBar */
   perFileErrors: Map<string, string> = new Map();
+  fullVaultSyncUnavailable = '';
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     // ── Service initialisation ──────────────────────────────────────────────
     this.tokenStore = new TokenStore(this);
+    try {
+      await this.tokenStore.initialize();
+    } catch (error) {
+      this.fullVaultSyncUnavailable = (error as Error).message;
+      console.warn('[GDocsPlugin] Full-vault sync unavailable:', error);
+    }
     this.auth = new GoogleAuth(this, this.tokenStore);
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.tasksApi = new GoogleTasksAPI(this.tokenStore);
@@ -61,7 +69,7 @@ export default class GDocsPlugin extends Plugin {
     // Handles obsidian://gdocs-sync in Obsidian and geode://gdocs-sync in Geode.
     console.log('[GDocsPlugin] Registering gdocs-sync protocol handler...');
     this.registerObsidianProtocolHandler('gdocs-sync', async (params) => {
-      console.log('[GDocsPlugin] Protocol handler fired! Raw params:', JSON.stringify(params));
+      console.log('[GDocsPlugin] OAuth protocol handler fired for event:', params['event'] ?? 'unknown');
       await this.auth.handleCallback(params);
     });
     console.log('[GDocsPlugin] Protocol handler registered.');
@@ -82,6 +90,18 @@ export default class GDocsPlugin extends Plugin {
     // ── Settings tab ────────────────────────────────────────────────────────
     this.settingsTab = new GDocsSettingTab(this.app, this as unknown as GDocsPluginInterface);
     this.addSettingTab(this.settingsTab);
+
+    if (!this.fullVaultSyncUnavailable) {
+      try {
+        this.registerSyncProvider(new GoogleDriveSyncProvider(this.tokenStore, {
+          rootFolderId: this.settings.fullVaultRootFolderId,
+          saveRootFolderId: async (id) => { this.settings.fullVaultRootFolderId = id; await this.saveSettings(); },
+        }));
+      } catch (error) {
+        this.fullVaultSyncUnavailable = 'Google Drive does not provide atomic conditional writes required by Geode. Full-vault sync remains disabled to protect your files.';
+        console.warn('[GDocsPlugin] Full-vault provider rejected safely:', error);
+      }
+    }
 
     // ── Commands ────────────────────────────────────────────────────────────
 

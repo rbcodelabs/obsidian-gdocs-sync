@@ -6,29 +6,53 @@ import { GDocsTokens, GDocsPluginSettings } from '../types';
 type PluginWithSettings = Plugin & {
   settings: GDocsPluginSettings;
   saveSettings(): Promise<void>;
+  loadSecret(key: string): Promise<string | null>;
+  saveSecret(key: string, value: string): Promise<void>;
+  removeSecret(key: string): Promise<void>;
 };
+
+const TOKEN_SECRET_KEY = 'google-oauth-tokens';
 
 export class TokenStore {
   private plugin: PluginWithSettings;
+  private tokens: GDocsTokens | null = null;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin as PluginWithSettings;
   }
 
+  async initialize(): Promise<void> {
+    if (typeof this.plugin.loadSecret !== 'function' || typeof this.plugin.saveSecret !== 'function') {
+      throw new Error('Secure secret storage is unavailable. Run this plugin in Geode with native secure storage.');
+    }
+    const encoded = await this.plugin.loadSecret(TOKEN_SECRET_KEY);
+    if (encoded) {
+      try { this.tokens = JSON.parse(encoded) as GDocsTokens; } catch { throw new Error('Stored Google credentials are corrupt. Reconnect your account.'); }
+    }
+    const legacy = this.plugin.settings.tokens;
+    if (legacy) {
+      this.tokens = legacy;
+      try { await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(legacy)); }
+      catch { throw new Error('Secure secret storage is unavailable. Legacy credentials were not removed.'); }
+      this.plugin.settings.tokens = null;
+      try { await this.plugin.saveSettings(); }
+      catch (error) { this.plugin.settings.tokens = legacy; await this.plugin.removeSecret(TOKEN_SECRET_KEY).catch(() => undefined); throw error; }
+    }
+  }
+
   get(): GDocsTokens | null {
-    return this.plugin.settings.tokens;
+    return this.tokens;
   }
 
   async set(tokens: GDocsTokens): Promise<void> {
     console.log('[TokenStore] set() called. expiresAt:', new Date(tokens.expiresAt).toISOString());
-    this.plugin.settings.tokens = tokens;
-    await this.plugin.saveSettings();
-    console.log('[TokenStore] saveSettings() complete. tokens in settings:', !!this.plugin.settings.tokens);
+    await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+    this.tokens = tokens;
   }
 
   async clear(): Promise<void> {
-    this.plugin.settings.tokens = null;
-    await this.plugin.saveSettings();
+    await this.plugin.removeSecret(TOKEN_SECRET_KEY);
+    this.tokens = null;
   }
 
   isExpired(): boolean {

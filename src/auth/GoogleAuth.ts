@@ -43,8 +43,8 @@ export class GoogleAuth {
   // Called from main.ts onload() via registerObsidianProtocolHandler.
   // Persistent for the lifetime of the plugin — always ready to receive callbacks.
   async handleCallback(params: Record<string, string>): Promise<void> {
-    console.log('[GDocsAuth] handleCallback fired. params:', JSON.stringify(params));
-    console.log('[GDocsAuth] pendingState:', this.pendingState);
+    console.log('[GDocsAuth] handleCallback fired for event:', params['event'] ?? 'unknown');
+    console.log('[GDocsAuth] pending OAuth state present:', this.pendingState !== null);
 
     // Obsidian overwrites "action" with the handler name — we use "event" instead.
     if (params['event'] !== 'auth_complete') {
