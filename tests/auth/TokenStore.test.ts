@@ -67,6 +67,19 @@ function plugin(overrides: Record<string, unknown> = {}) {
 }
 
 describe('TokenStore secure persistence', () => {
+  it('preserves legacy Obsidian persistence when Geode secret storage is absent', async () => {
+    const p = plugin({ loadSecret: undefined, saveSecret: undefined, removeSecret: undefined });
+    p.settings.tokens = tokens;
+    const store = new TokenStore(p as never);
+    await store.initialize();
+    expect(store.get()).toEqual(tokens);
+    expect(store.hasSecureStorage()).toBe(false);
+    const next = { ...tokens, accessToken: 'next' };
+    await store.set(next);
+    expect(p.settings.tokens).toEqual(next);
+    await store.clear();
+    expect(p.settings.tokens).toBeNull();
+  });
   it('migrates legacy settings only after the secure write succeeds', async () => {
     const p = plugin();
     p.settings.tokens = tokens;

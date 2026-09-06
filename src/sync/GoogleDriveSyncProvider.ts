@@ -11,7 +11,7 @@ export class DriveProviderError extends Error {
 
 class RemotePreconditionError extends Error { constructor() { super('Google Drive changed since it was scanned'); this.name = 'SyncPreconditionError'; } }
 
-interface DriveMetadata { id: string; name: string; mimeType?: string; parents?: string[]; version?: string; size?: string; md5Checksum?: string; appProperties?: Record<string, string>; }
+interface DriveMetadata { id: string; name: string; mimeType?: string; parents?: string[]; version?: string; size?: string; md5Checksum?: string; appProperties?: Record<string, string>; trashed?: boolean; }
 interface ProviderConfig { rootFolderId: string; saveRootFolderId(id: string): Promise<void> | void; }
 
 function escapeQuery(value: string): string { return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'"); }
@@ -46,7 +46,13 @@ class DriveClient {
   }
   async json<T>(url: string, options?: RequestInit): Promise<T> { const response = await this.fetch(url, options); return response.status === 204 ? undefined as T : response.json() as Promise<T>; }
   async ensureRoot(configured: string, vaultId: string): Promise<string> {
-    if (configured) return configured;
+    if (configured) {
+      const root = await this.json<DriveMetadata>(`${DRIVE}/files/${encodeURIComponent(configured)}?fields=id,name,mimeType,appProperties,trashed`);
+      if (root.trashed || root.mimeType !== FOLDER || root.appProperties?.geodeVaultId !== vaultId) {
+        throw new DriveProviderError('The configured Google Drive folder does not belong to this Geode vault. Disconnect and reconnect full-vault sync.', 'permission_denied');
+      }
+      return configured;
+    }
     const q = `mimeType='${FOLDER}' and trashed=false and appProperties has { key='geodeVaultId' and value='${escapeQuery(vaultId)}' }`;
     const existing = await this.json<{ files?: DriveMetadata[] }>(`${DRIVE}/files?q=${encodeURIComponent(q)}&fields=files(id,name,version)&pageSize=10`);
     if (existing.files?.[0]) return existing.files[0].id;
@@ -69,7 +75,7 @@ class DriveClient {
   async patch(id: string, body: object, signal: AbortSignal, query = '') { return this.json<DriveMetadata>(`${DRIVE}/files/${encodeURIComponent(id)}?fields=id,name,mimeType,parents,version,size,md5Checksum,appProperties${query}`, { method: 'PATCH', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }); }
   async upload(id: string, data: ArrayBuffer, signal: AbortSignal) { return this.json<DriveMetadata>(`${UPLOAD}/files/${encodeURIComponent(id)}?uploadType=media&fields=id,name,mimeType,parents,version,size,md5Checksum,appProperties`, { method: 'PATCH', signal, headers: { 'Content-Type': 'application/octet-stream' }, body: data }); }
   async createFile(name: string, parent: string, data: ArrayBuffer, operationKey: string, signal: AbortSignal) {
-    const prior = await this.findOperation(operationKey, signal); if (prior) return this.upload(prior.id, data, signal);
+    const prior = await this.findOperation(operationKey, signal); if (prior) return prior;
     const metadata = await this.json<DriveMetadata>(`${DRIVE}/files?fields=id,name,mimeType,parents,version,size,md5Checksum,appProperties`, { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, parents: [parent], mimeType: 'application/octet-stream', appProperties: { geodeOperationKey: operationKey } }) });
     return this.upload(metadata.id, data, signal);
   }

@@ -16,15 +16,18 @@ const TOKEN_SECRET_KEY = 'google-oauth-tokens';
 export class TokenStore {
   private plugin: PluginWithSettings;
   private tokens: GDocsTokens | null = null;
+  private secure = false;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin as PluginWithSettings;
   }
 
   async initialize(): Promise<void> {
-    if (typeof this.plugin.loadSecret !== 'function' || typeof this.plugin.saveSecret !== 'function') {
-      throw new Error('Secure secret storage is unavailable. Run this plugin in Geode with native secure storage.');
+    if (typeof this.plugin.loadSecret !== 'function' || typeof this.plugin.saveSecret !== 'function' || typeof this.plugin.removeSecret !== 'function') {
+      this.tokens = this.plugin.settings.tokens;
+      return;
     }
+    this.secure = true;
     const encoded = await this.plugin.loadSecret(TOKEN_SECRET_KEY);
     if (encoded) {
       try { this.tokens = JSON.parse(encoded) as GDocsTokens; } catch { throw new Error('Stored Google credentials are corrupt. Reconnect your account.'); }
@@ -44,14 +47,18 @@ export class TokenStore {
     return this.tokens;
   }
 
+  hasSecureStorage(): boolean { return this.secure; }
+
   async set(tokens: GDocsTokens): Promise<void> {
     console.log('[TokenStore] set() called. expiresAt:', new Date(tokens.expiresAt).toISOString());
-    await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+    if (this.secure) await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+    else { this.plugin.settings.tokens = tokens; await this.plugin.saveSettings(); }
     this.tokens = tokens;
   }
 
   async clear(): Promise<void> {
-    await this.plugin.removeSecret(TOKEN_SECRET_KEY);
+    if (this.secure) await this.plugin.removeSecret(TOKEN_SECRET_KEY);
+    else { this.plugin.settings.tokens = null; await this.plugin.saveSettings(); }
     this.tokens = null;
   }
 

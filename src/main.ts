@@ -38,6 +38,7 @@ export default class GDocsPlugin extends Plugin {
     this.tokenStore = new TokenStore(this);
     try {
       await this.tokenStore.initialize();
+      if (!this.tokenStore.hasSecureStorage()) this.fullVaultSyncUnavailable = 'Secure secret storage is unavailable. Full-vault sync requires Geode; Google Docs and Tasks remain available.';
     } catch (error) {
       this.fullVaultSyncUnavailable = (error as Error).message;
       console.warn('[GDocsPlugin] Full-vault sync unavailable:', error);
