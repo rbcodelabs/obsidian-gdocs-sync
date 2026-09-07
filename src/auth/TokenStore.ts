@@ -17,17 +17,20 @@ export class TokenStore {
   private plugin: PluginWithSettings;
   private tokens: GDocsTokens | null = null;
   private secure = false;
+  private secureRequired = false;
 
   constructor(plugin: Plugin) {
     this.plugin = plugin as PluginWithSettings;
   }
 
   async initialize(): Promise<void> {
+    this.tokens = this.plugin.settings.tokens;
+    this.secure = false;
     if (typeof this.plugin.loadSecret !== 'function' || typeof this.plugin.saveSecret !== 'function' || typeof this.plugin.removeSecret !== 'function') {
       this.tokens = this.plugin.settings.tokens;
       return;
     }
-    this.secure = true;
+    this.secureRequired = true;
     const encoded = await this.plugin.loadSecret(TOKEN_SECRET_KEY);
     if (encoded) {
       try { this.tokens = JSON.parse(encoded) as GDocsTokens; } catch { throw new Error('Stored Google credentials are corrupt. Reconnect your account.'); }
@@ -41,6 +44,7 @@ export class TokenStore {
       try { await this.plugin.saveSettings(); }
       catch (error) { this.plugin.settings.tokens = legacy; await this.plugin.removeSecret(TOKEN_SECRET_KEY).catch(() => undefined); throw error; }
     }
+    this.secure = true;
   }
 
   get(): GDocsTokens | null {
@@ -51,15 +55,30 @@ export class TokenStore {
 
   async set(tokens: GDocsTokens): Promise<void> {
     console.log('[TokenStore] set() called. expiresAt:', new Date(tokens.expiresAt).toISOString());
-    if (this.secure) await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+    if (this.secureRequired) {
+      this.secure = false;
+      await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+      await this.clearLegacy();
+      this.secure = true;
+    }
     else { this.plugin.settings.tokens = tokens; await this.plugin.saveSettings(); }
     this.tokens = tokens;
   }
 
   async clear(): Promise<void> {
-    if (this.secure) await this.plugin.removeSecret(TOKEN_SECRET_KEY);
-    else { this.plugin.settings.tokens = null; await this.plugin.saveSettings(); }
+    // A failed migration may leave credentials in both stores. Disconnect only
+    // succeeds when neither persisted copy can restore the account on restart.
+    await this.clearLegacy();
+    if (this.secureRequired) await this.plugin.removeSecret(TOKEN_SECRET_KEY);
     this.tokens = null;
+  }
+
+  private async clearLegacy(): Promise<void> {
+    const legacy = this.plugin.settings.tokens;
+    if (!legacy) return;
+    this.plugin.settings.tokens = null;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.tokens = legacy; throw error; }
   }
 
   isExpired(): boolean {

@@ -85,11 +85,13 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 
 ### Google Drive full-vault transport groundwork (disabled)
 
-This branch includes dormant **Google Drive (full vault)** transport groundwork. It is not an available full-vault sync beta. When loaded in Geode, registration is rejected before a transport session opens, so installing this branch does not create a full-vault Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
+This branch includes dormant **Google Drive (full vault)** transport source and unit tests. It is not an available full-vault sync beta. The transport is deliberately excluded from the production plugin bundle and is not registered with Geode, so installing this branch does not create a full-vault Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
 
 The transport implementation can represent files as original bytes in a dedicated **Geode Vault** folder using the existing narrow `drive.file` OAuth scope. Geode owns preview, selective scope, journal, conflicts, and recoverable-delete policy. Enabling Drive requires a separately designed and verified atomic revision protocol or another supported transport.
 
-Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider reports `conditionalWrites: false`, so current Geode builds reject activation rather than risking a lost update. The settings page explains this fail-closed state. Native Google Docs and Google Tasks syncing remain available independently.
+Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The source reports `conditionalWrites: false`, which also prevents activation under Geode's current contract. Settings explains that full-vault sync is unavailable.
+
+Before any activation, this groundwork needs an atomic revision protocol, recoverable completion of interrupted file creation (metadata creation can succeed before byte upload fails), root schema validation, and a host-supported network transport that preserves cancellation. The unbundled prototype currently uses `fetch`; all shipped auth, Docs, and Tasks HTTP paths use Obsidian's `requestUrl`.
 
 OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
 

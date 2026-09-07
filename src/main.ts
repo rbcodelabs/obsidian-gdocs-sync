@@ -12,7 +12,6 @@ import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
-import { GoogleDriveSyncProvider } from './sync/GoogleDriveSyncProvider';
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -29,7 +28,7 @@ export default class GDocsPlugin extends Plugin {
   settingsTab!: GDocsSettingTab;
   /** Per-file error messages populated on push/pull failure, read by FileCommandBar */
   perFileErrors: Map<string, string> = new Map();
-  fullVaultSyncUnavailable = '';
+  fullVaultSyncUnavailable = 'Google Drive full-vault sync is not available in this beta. The transport groundwork is disabled pending a safe atomic revision protocol.';
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -91,18 +90,6 @@ export default class GDocsPlugin extends Plugin {
     // ── Settings tab ────────────────────────────────────────────────────────
     this.settingsTab = new GDocsSettingTab(this.app, this as unknown as GDocsPluginInterface);
     this.addSettingTab(this.settingsTab);
-
-    if (!this.fullVaultSyncUnavailable) {
-      try {
-        this.registerSyncProvider(new GoogleDriveSyncProvider(this.tokenStore, {
-          rootFolderId: this.settings.fullVaultRootFolderId,
-          saveRootFolderId: async (id) => { this.settings.fullVaultRootFolderId = id; await this.saveSettings(); },
-        }));
-      } catch (error) {
-        this.fullVaultSyncUnavailable = 'Google Drive does not provide atomic conditional writes required by Geode. Full-vault sync remains disabled to protect your files.';
-        console.warn('[GDocsPlugin] Full-vault provider rejected safely:', error);
-      }
-    }
 
     // ── Commands ────────────────────────────────────────────────────────────
 

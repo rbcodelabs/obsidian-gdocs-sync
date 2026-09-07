@@ -70,6 +70,80 @@ function plugin(overrides: Record<string, unknown> = {}) {
 }
 
 describe('TokenStore secure persistence', () => {
+  it('keeps legacy credentials usable when native storage reads fail without downgrading fresh writes', async () => {
+    const p = plugin({
+      loadSecret: vi.fn(async () => { throw new Error('keychain locked'); }),
+      saveSecret: vi.fn(async () => { throw new Error('keychain locked'); }),
+    });
+    p.settings.tokens = { ...tokens, expiresAt: Date.now() + 3600_000 };
+    const legacy = p.settings.tokens;
+    const store = new TokenStore(p as never);
+    await expect(store.initialize()).rejects.toThrow('keychain locked');
+    expect(store.get()).toEqual(legacy);
+    await expect(store.getValidAccessToken()).resolves.toBe('access');
+    expect(store.hasSecureStorage()).toBe(false);
+    await expect(store.set({ ...legacy, accessToken: 'new' })).rejects.toThrow('keychain locked');
+    expect(p.settings.tokens).toEqual(legacy);
+    expect(p.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('clears both copies after migration cleanup fails so restart cannot restore disconnected credentials', async () => {
+    let secret: string | null = null;
+    let persisted: GDocsTokens | null = tokens;
+    const p = plugin({
+      loadSecret: vi.fn(async () => secret),
+      saveSecret: vi.fn(async (_key: string, value: string) => { secret = value; }),
+      removeSecret: vi.fn(async () => { secret = null; }),
+    });
+    p.settings.tokens = tokens;
+    p.saveSettings.mockRejectedValueOnce(new Error('disk full'));
+    p.saveSettings.mockImplementation(async () => { persisted = p.settings.tokens; });
+    const store = new TokenStore(p as never);
+    await expect(store.initialize()).rejects.toThrow('disk full');
+    expect(store.hasSecureStorage()).toBe(false);
+    await store.clear();
+    expect(persisted).toBeNull();
+    expect(secret).toBeNull();
+    p.settings.tokens = persisted;
+    const restarted = new TokenStore(p as never);
+    await restarted.initialize();
+    expect(restarted.get()).toBeNull();
+  });
+
+  it('removes leftover legacy credentials on reconnect after failed migration', async () => {
+    let secret: string | null = null;
+    const p = plugin({
+      loadSecret: vi.fn(async () => secret),
+      saveSecret: vi.fn(async (_key: string, value: string) => { secret = value; }),
+      removeSecret: vi.fn(async () => { secret = null; }),
+    });
+    p.settings.tokens = tokens;
+    p.saveSettings.mockRejectedValueOnce(new Error('disk full'));
+    const store = new TokenStore(p as never);
+    await expect(store.initialize()).rejects.toThrow('disk full');
+    const reconnected = { ...tokens, accessToken: 'reconnected' };
+    await store.set(reconnected);
+    expect(p.settings.tokens).toBeNull();
+    const restarted = new TokenStore(p as never);
+    await restarted.initialize();
+    expect(restarted.get()).toEqual(reconnected);
+  });
+
+  it('reports disconnect persistence failure and retains legacy state for a retry', async () => {
+    const p = plugin();
+    p.settings.tokens = tokens;
+    p.saveSettings.mockRejectedValue(new Error('disk full'));
+    const store = new TokenStore(p as never);
+    await expect(store.initialize()).rejects.toThrow('disk full');
+    await expect(store.clear()).rejects.toThrow('disk full');
+    expect(p.settings.tokens).toEqual(tokens);
+    expect(store.get()).toEqual(tokens);
+    p.saveSettings.mockResolvedValue(undefined);
+    await store.clear();
+    expect(p.settings.tokens).toBeNull();
+    expect(store.get()).toBeNull();
+  });
+
   it('preserves legacy Obsidian persistence when Geode secret storage is absent', async () => {
     const p = plugin({ loadSecret: undefined, saveSecret: undefined, removeSecret: undefined });
     p.settings.tokens = tokens;
