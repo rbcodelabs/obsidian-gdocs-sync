@@ -17,7 +17,40 @@ function makeStore(error: string | null = null) {
 
 describe('TokenStore refresh', () => {
   const requestUrlMock = vi.mocked(requestUrl);
-  beforeEach(() => requestUrlMock.mockReset());
+  beforeEach(() => { requestUrlMock.mockReset(); });
+  it('does not restore tokens when an old refresh completes after disconnect', async () => {
+    let complete!: (value: never) => void;
+    requestUrlMock.mockImplementation(() => new Promise(resolve => { complete = resolve; }) as never);
+    const { store, plugin } = makeStore();
+    await store.initialize();
+    const refreshing = store.getValidAccessToken();
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    await store.clear();
+    complete({ status: 200, json: { access_token: 'stale', expires_in: 3600 } } as never);
+    await expect(refreshing).rejects.toThrow(/account changed/i);
+    expect(store.get()).toBeNull();
+    expect(plugin.settings.tokens).toBeNull();
+  });
+  it('does not overwrite a reconnected account with an old refresh result', async () => {
+    let complete!: (value: never) => void;
+    requestUrlMock.mockImplementation(() => new Promise(resolve => { complete = resolve; }) as never);
+    const { store, plugin } = makeStore();
+    await store.initialize();
+    const refreshing = store.getValidAccessToken();
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    const newAccount = { accessToken: 'new-account', refreshToken: 'new-refresh', expiresAt: Date.now() + 3600_000 };
+    await store.set(newAccount);
+    complete({ status: 200, json: { access_token: 'stale', expires_in: 3600 } } as never);
+    await expect(refreshing).rejects.toThrow(/account changed/i);
+    expect(store.get()).toEqual(newAccount);
+    expect(plugin.settings.tokens).toEqual(newAccount);
+  });
+  it('shares one refresh request across simultaneous API callers', async () => {
+    requestUrlMock.mockResolvedValue({ status: 200, json: { access_token: 'new', expires_in: 3600 } } as never);
+    const { store } = makeStore(); await store.initialize();
+    await expect(Promise.all([store.getValidAccessToken(), store.getValidAccessToken()])).resolves.toEqual(['new', 'new']);
+    expect(requestUrlMock).toHaveBeenCalledOnce();
+  });
 
   it('refreshes through requestUrl and stores rotated tokens', async () => {
     requestUrlMock.mockResolvedValue({
