@@ -28,7 +28,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
-- **Geode full-vault transport (preview)** — raw byte-preserving Google Drive files and folders behind Geode's host-owned sync framework; separate from native Google Docs note links
+- **Geode secure credentials** — migrates existing OAuth tokens into Geode's encrypted secret store; ordinary Obsidian retains its existing settings-backed authentication
 
 ---
 
@@ -83,13 +83,17 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
 
-### Geode full-vault sync
+### Google Drive full-vault transport groundwork (disabled)
 
-When loaded in Geode, the plugin also attempts to register a distinct **Google Drive (full vault)** transport. Geode—not this plugin—owns the initial preview, selective scope, journal, conflicts, and recoverable-delete policy. The transport creates a dedicated **Geode Vault** folder using the existing narrow `drive.file` OAuth scope and stores files as their original bytes.
+This branch includes dormant **Google Drive (full vault)** transport groundwork. It is not an available full-vault sync beta. When loaded in Geode, registration is rejected before a transport session opens, so installing this branch does not create a full-vault Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
+
+The transport implementation can represent files as original bytes in a dedicated **Geode Vault** folder using the existing narrow `drive.file` OAuth scope. Geode owns preview, selective scope, journal, conflicts, and recoverable-delete policy. Enabling Drive requires a separately designed and verified atomic revision protocol or another supported transport.
 
 Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider reports `conditionalWrites: false`, so current Geode builds reject activation rather than risking a lost update. The settings page explains this fail-closed state. Native Google Docs and Google Tasks syncing remain available independently.
 
 OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
+
+On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode. Test full-vault activation only to confirm the unavailable explanation; there is no supported Drive vault synchronization flow in this delivery.
 
 ---
 
@@ -119,13 +123,13 @@ When hosted by Geode, the plugin detects the explicit `window.geode.host` marker
 
 ### Automated tests
 
-The converter layer has full unit test coverage using [Vitest](https://vitest.dev/):
+Run the automated suite using [Vitest](https://vitest.dev/):
 
 ```bash
 npm test
 ```
 
-Tests live in `tests/converter/` and cover:
+The suite covers OAuth callbacks, token refresh and secure migration, Docs/Tasks APIs and sync behavior, and the dormant Drive transport. Converter tests live in `tests/converter/` and cover:
 
 | File | What's tested |
 |---|---|
@@ -135,6 +139,8 @@ Tests live in `tests/converter/` and cover:
 Test payloads are captured from the live API where relevant — no mocks for conversion logic — so format regressions are caught without running Obsidian.
 
 ### Manual / integration testing
+
+There is currently no automated E2E or screenshot harness in this repository. Unit tests use a mocked Obsidian host; real-host OAuth, encrypted persistence across restarts, and Google Docs/Tasks network round trips require manual beta verification.
 
 To verify the full sync loop end-to-end:
 

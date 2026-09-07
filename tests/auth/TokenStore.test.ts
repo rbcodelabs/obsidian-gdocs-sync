@@ -26,6 +26,7 @@ describe('TokenStore refresh', () => {
       text: '',
     } as never);
     const { store, plugin } = makeStore();
+    await store.initialize();
 
     await expect(store.getValidAccessToken()).resolves.toBe('new');
     expect(requestUrlMock).toHaveBeenCalledWith(expect.objectContaining({
@@ -40,6 +41,7 @@ describe('TokenStore refresh', () => {
   it('clears revoked tokens and preserves the reconnect error', async () => {
     requestUrlMock.mockResolvedValue({ status: 400, json: { error: 'invalid_grant' }, text: '' } as never);
     const { store, plugin } = makeStore();
+    await store.initialize();
 
     await expect(store.getValidAccessToken()).rejects.toThrow(/revoked.*reconnect/i);
     expect(plugin.settings.tokens).toBeNull();
@@ -48,6 +50,7 @@ describe('TokenStore refresh', () => {
   it('falls back to the HTTP status for a non-JSON refresh failure', async () => {
     requestUrlMock.mockResolvedValue({ status: 502, json: undefined, text: 'bad gateway' } as never);
     const { store } = makeStore();
+    await store.initialize();
     await expect(store.getValidAccessToken()).rejects.toThrow('Token refresh failed [http_502]');
   });
 });
