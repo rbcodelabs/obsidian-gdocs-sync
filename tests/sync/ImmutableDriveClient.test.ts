@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 import { createHash } from 'node:crypto';
-import { ImmutableDriveClient, type ReservedObject } from '../../src/sync/drive/ImmutableDriveClient';
+import { canonicalJson, ImmutableDriveClient, type ReservedObject } from '../../src/sync/drive/ImmutableDriveClient';
 
 const bytes = new TextEncoder().encode('synthetic immutable bytes').buffer;
 const sha256 = 'e7d3439a31f306feb8f4ada89efe6fb145a70a8f15417cf25e4ae1bd983063c4';
@@ -25,6 +25,9 @@ function respondCreated() {
 
 describe('immutable Drive create', () => {
   beforeEach(() => { vi.mocked(requestUrl).mockReset(); });
+  it('omits absent optional record fields from canonical JSON', () => {
+    expect(canonicalJson({ schema: 1, blob: undefined, location: { name: 'folder', parentId: null } })).toBe('{"location":{"name":"folder","parentId":null},"schema":1}');
+  });
   it('persists bounded individual reservation records instead of growing-map snapshots', async () => {
     const f = fixture();
     for (let index = 0; index < 3; index++) {

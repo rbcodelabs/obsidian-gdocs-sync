@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 import { createHash } from 'node:crypto';
-import { mkdtemp, readFile, writeFile, rename } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, rename, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalJson } from '../../src/sync/drive/ImmutableDriveClient';
@@ -67,6 +67,8 @@ const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0
 const digest = (data: ArrayBuffer) => createHash('sha256').update(new Uint8Array(data)).digest('hex');
 
 describe('append-only Google Drive vaults', () => {
+  const fixtureDirectories: string[] = [];
+  afterEach(async () => { await Promise.all(fixtureDirectories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
   beforeEach(() => { vi.mocked(requestUrl).mockReset(); vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Renderer fetch forbidden'); })); });
   it('reports an incomplete setup root without hiding unrelated valid vaults', async () => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
@@ -79,6 +81,7 @@ describe('append-only Google Drive vaults', () => {
   it('keeps disk-backed upload, append and blob observation writes bounded per object', async () => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
     const a = local(); const directory = await mkdtemp(join(tmpdir(), 'drive-journal-scale-'));
+    fixtureDirectories.push(directory);
     let totalBytes = 0; let maximumBytes = 0; let writes = 0;
     a.config.loadDeviceState.mockImplementation(async <T,>(key: string): Promise<T | null> => {
       try { return JSON.parse(await readFile(join(directory, createHash('sha256').update(key).digest('hex')), 'utf8')); }

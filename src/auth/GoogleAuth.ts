@@ -35,7 +35,7 @@ export class GoogleAuth {
   // Called after successful auth so the settings tab can refresh its UI.
   onConnected: (() => void) | null = null;
 
-  constructor(plugin: Plugin, tokenStore: TokenStore) {
+  constructor(plugin: Plugin, tokenStore: TokenStore, private openAuthUrl: (url: string) => void | Promise<void> = url => window.require('electron').shell.openExternal(url)) {
     this.plugin = plugin as PluginWithSettings;
     this.tokenStore = tokenStore;
   }
@@ -125,8 +125,7 @@ export class GoogleAuth {
     // Use Electron's shell.openExternal so the URL opens in the user's default
     // browser with their normal profile — window.open() hands off to Chrome
     // without profile context, which causes it to open incognito.
-    const { shell } = window.require('electron');
-    shell.openExternal(authUrl);
+    await this.openAuthUrl(authUrl);
 
     new Notice('Opening Google sign-in... Return here after authorizing.');
   }

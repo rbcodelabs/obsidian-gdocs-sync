@@ -29,6 +29,7 @@ export interface GDocsPluginInterface extends Plugin {
   statusBar: StatusBarItem;
   startTasksSyncIfEnabled(): Promise<void>;
   fullVaultSyncUnavailable: string;
+  fullVaultSyncWarnings?: string[];
   tokenStore: TokenStore;
 }
 
@@ -97,6 +98,7 @@ export class GDocsSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName('Google Drive vault transport')
       .setDesc(this.pluginInstance.fullVaultSyncUnavailable || 'Registered with Geode. Connect it from Geode Settings → Sync. Files are stored as original bytes in a dedicated “Geode Vault” Drive folder; native Google Docs note links remain separate.');
+    for (const warning of this.pluginInstance.fullVaultSyncWarnings ?? []) new Setting(containerEl).setName('Managed vault discovery needs attention').setDesc(warning);
 
     // ── Section 2: Sync Rules ───────────────────────────────────────────────
     containerEl.createEl('h2', { text: 'Sync Rules' });
