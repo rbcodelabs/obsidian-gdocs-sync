@@ -20,6 +20,16 @@ PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/@playwright/test node tests/liv
 
 This launches isolated headless Chrome and a local synthetic proxy, verifies callback delivery, and checks browser history/address/console for token URL exposure. It makes no Google requests. The fixture closes only its own browser and server.
 
+After explicit user approval of the disposable account, the live driver can open one isolated client:
+
+```sh
+GEODE_QA_CORE=/absolute/core/worktree GEODE_QA_OUTPUT=/absolute/disposable/output node tests/live/run-isolated.mjs --authorize-disposable-account
+```
+
+This driver is not yet live-verified. It launches Geode with `GEODE_HEADLESS=1` to suppress global protocol registration and single-instance routing, then explicitly shows only its own window. Click Connect there to open an isolated Chrome context. The driver creates no remote roots and starts no sync. A private fixture manifest records local profile paths; retain it and record every explicitly created disposable remote root for later user-directed cleanup. Close the isolated client or interrupt the driver to close only its own processes. Repeat independently for each client; do not copy credentials between profiles.
+
+Ordinary Obsidian regression acceptance remains separate: prove its profile/vault isolation first, then verify Connect/refresh/reconnect, disposable Google Docs push and pull, and Google Tasks behavior. The current capture helper intentionally accepts only `geode://`; do not use it for an Obsidian callback without an explicit, tested allowlist extension. Never let either test flow launch the user's installed protocol handler.
+
 Disk amplification benchmark (mock Drive, real atomic filesystem writes):
 
 ```sh
