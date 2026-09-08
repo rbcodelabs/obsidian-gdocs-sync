@@ -2,6 +2,8 @@
 
 This runner is acceptance-only. It neither authorizes accounts nor launches an app/browser, reads tokens, changes protocol handlers, or deletes remote data. Do not invoke it against user vaults. Passing its synthetic orchestration tests is **not** live Drive acceptance.
 
+For a directly executable three-profile driver with sign-in and recovery hooks already wired, use [RUN-ACCEPTANCE.md](RUN-ACCEPTANCE.md). The API below is for programmatic use.
+
 An operator must explicitly authorize the disposable account and remote writes, then supply three separately authorized, isolated Geode Playwright pages. Each page needs the QA plugin build exposing `qaProvider`, a distinct synthetic vault beneath one private fixture directory (0700), and a separate user-data profile. The runner validates distinct pages/vaults, not the underlying profile or account; the operator must verify those. Disable HAR/tracing, sign-in screenshots, and request/console diagnostics.
 
 ```js
@@ -32,7 +34,7 @@ There is deliberately no command-line auto-execution or authorization switch. Co
 - **rename-delete-edit:** synthetic rename/edit and delete/edit branches while two clients are paused; all three clients must retain both conflicts. It then resolves displayed versions and verifies identical valid paths/bytes and zero remaining conflicts before later recovery stages.
 - **portable-config:** a logical editor setting changed through public `vault.setConfig`, verified in persisted and runtime settings on three clients. This covers editor settings, not the complete appearance/hotkeys/daily-notes matrix.
 - **large-file:** an exactly 100 MiB synthetic binary travels through actual host writes and sync; size and SHA-256 must agree on all clients. This is explicitly expensive and requires operator approval.
-- **interrupted-transfer:** requires caller-supplied `hooks.interruptedTransfer({pages, pluginId, fixtureDirectory, rootName})`. That operator hook must inject a real transfer interruption, restart only the isolated independently authorized client, recover it, and return `{verified:true, hashes:[verifiedSha256], bytes:verifiedByteCount}`. Missing/negative proof persists `not-verified`; the runner never substitutes an ordinary replay for this gate. Hook orchestration itself remains operator implementation, not an implemented live test here.
+- **interrupted-transfer:** requires `hooks.interruptedTransfer({pages, pluginId, fixtureDirectory, rootName})`. The supplied [owned-process hooks](LIVE-HOOKS.md) inject a transfer interruption, restart only the isolated independently authorized client, recover it, and return verified hash/byte evidence. Missing/negative proof persists `not-verified`; the runner never substitutes an ordinary replay for this gate. The CLI wires these hooks, but actual Drive execution remains unverified.
 - **scale:** 10,000 separate `bench-*.md` files, sequential actual host sync on three clients, matching byte hashes, aggregate hash, elapsed time and counted host network requests. This can take substantial time and consume Drive quota; invoke only with explicit load-test approval. Background polling can add requests to the observed count; this is an end-to-end count, not a transport microbenchmark.
 - **soak:** one new synthetic file per invocation and verified three-client reconstruction. Passing requires at least 25 ticks spanning 24 hours, no inter-tick gap over 90 minutes, and `hooks.soakEvidence()` returning `{offlineRestartVerified:true}` after the operator has actually exercised and verified offline/restart recovery. Missing evidence or excessive gaps persist `not-verified`; two ticks separated by 24 hours cannot pass. Schedule hourly; the runner never sleeps or launches a scheduler itself.
 
@@ -42,7 +44,7 @@ Byte checks compare against independently computed synthetic source hashes, not 
 
 ## Remaining operator acceptance
 
-This scaffold does **not** establish real account authorization, real interruption-hook implementation, credential refresh/reconnect, complete portable-settings/conflict coverage, or ordinary Obsidian Docs/Tasks compatibility. Those remain separate required procedures. Executable matrix/large-file steps are unverified on Drive until an authorized operator runs them. No live stage was run while preparing this runner; there is no overall beta-pass flag.
+This scaffold does **not** establish real account authorization, live interruption-hook results, credential refresh/reconnect, complete portable-settings/conflict coverage, or ordinary Obsidian Docs/Tasks compatibility. Those remain separate required procedures. Executable matrix/large-file steps are unverified on Drive until an authorized operator runs them. No live stage was run while preparing this runner; there is no overall beta-pass flag.
 
 Offline safety/orchestration check (no browser or network):
 
