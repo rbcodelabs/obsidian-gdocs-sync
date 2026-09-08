@@ -25,6 +25,43 @@ function respondCreated() {
 
 describe('immutable Drive create', () => {
   beforeEach(() => vi.mocked(requestUrl).mockReset());
+  it('refreshes authentication once and retries with the refreshed token', async () => {
+    const f = fixture();
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(401) as never).mockResolvedValueOnce(response(200, { ok: true }) as never);
+    await f.client.request({ url: 'https://www.googleapis.com/drive/v3/about?fields=user' }, signal());
+    expect(f.auth.refreshAccessToken).toHaveBeenCalledOnce();
+    expect((vi.mocked(requestUrl).mock.calls[1][0] as RequestUrlParam).headers?.Authorization).toBe('Bearer synthetic-refreshed-token');
+  });
+  it('honors Retry-After and bounds transient retries', async () => {
+    const f = fixture();
+    vi.mocked(requestUrl).mockResolvedValue(response(429, {}, undefined, { 'retry-after': '3' }) as never);
+    await expect(f.client.request({ url: 'https://www.googleapis.com/drive/v3/about?fields=user' }, signal())).rejects.toThrow('429');
+    expect(requestUrl).toHaveBeenCalledTimes(4);
+    expect(f.sleep.mock.calls.map(call => call[0])).toEqual([3000, 3000, 4000]);
+  });
+  it.each([401, 403, 404])('keeps HTTP %s failures actionable without leaking request URLs', async status => {
+    const f = fixture(); vi.mocked(requestUrl).mockResolvedValue(response(status) as never);
+    await expect(f.client.request({ url: 'https://www.googleapis.com/drive/v3/files?secret=never-log' }, signal())).rejects.toThrow(String(status));
+    expect(requestUrl).toHaveBeenCalledTimes(status === 401 ? 2 : 1);
+  });
+  it('does not send a new account token into an old session when token acquisition races reconnect', async () => {
+    const f = fixture();
+    f.auth.getAccessToken.mockImplementation(async () => { f.auth.assertCurrent.mockImplementation(() => { throw new Error('account changed'); }); return 'new-account-token'; });
+    await expect(f.client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal())).rejects.toThrow('account changed');
+    expect(requestUrl).not.toHaveBeenCalled();
+  });
+  it('creates a root folder with a caller-reserved ID and verifies its metadata without media reads', async () => {
+    const f = fixture();
+    const folder = { name: 'Synthetic vault', mimeType: 'application/vnd.google-apps.folder', appProperties: { geodeVaultId: 'vault', geodeObjectKind: 'root' } };
+    const empty = new ArrayBuffer(0);
+    const hash = createHash('sha256').update(new Uint8Array(empty)).digest('hex');
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(200, { id: 'folder-id' }) as never)
+      .mockResolvedValueOnce(response(200, { id: 'folder-id', ...folder, version: '1', trashed: false }) as never);
+    await expect(f.client.create({ operationKey: 'root', driveId: 'folder-id', metadata: folder, data: empty, sha256: hash }, signal())).resolves.toBe('folder-id');
+    expect(f.journal.save.mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(requestUrl).mock.invocationCallOrder[0]);
+    expect((vi.mocked(requestUrl).mock.calls[0][0] as RequestUrlParam).url).not.toContain('uploadType');
+    expect(requestUrl).toHaveBeenCalledTimes(2);
+  });
   it('uses a persisted secret resumable session and confirmed byte ranges for large files', async () => {
     const f = fixture();
     const data = new Uint8Array(6 * 1024 * 1024).buffer;

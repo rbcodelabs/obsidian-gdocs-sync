@@ -83,15 +83,17 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
 
-### Google Drive full-vault transport groundwork (disabled)
+### Google Drive managed-vault history (acceptance gated)
 
-This branch includes dormant **Google Drive (full vault)** transport source and unit tests. It is not an available full-vault sync beta. The transport is deliberately excluded from the production plugin bundle and is not registered with Geode, so installing this branch does not create a full-vault Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
+This branch includes **Google Drive managed-vault history** source and unit tests. It is not an available full-vault sync beta. The transport is excluded from the production plugin bundle while integration and live acceptance continue, and is not registered with Geode. Installing this branch does not create a managed Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
 
-The transport implementation can represent files as original bytes in a dedicated **Geode Vault** folder using the existing narrow `drive.file` OAuth scope. Geode owns preview, selective scope, journal, conflicts, and recoverable-delete policy. Enabling Drive requires a separately designed and verified atomic revision protocol or another supported transport.
+The new protocol stores original-byte blobs and complete immutable history records in a dedicated app-managed Drive folder using the existing narrow `drive.file` OAuth scope. Geode owns causal reconciliation, preview, selective scope, conflicts, and local recovery. Independent devices join the same immutable descriptor; remote vault identity does not depend on local folder paths. Deletions are explicit history records; missing objects are never interpreted as user deletion.
 
-Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The source reports `conditionalWrites: false`, which also prevents activation under Geode's current contract. Settings explains that full-vault sync is unavailable.
+Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider honestly reports `conditionalWrites: false` and implements the distinct `append-only-history-v1` contract instead. Settings continues to explain that full-vault sync is unavailable pending acceptance.
 
-Before any activation, this groundwork needs an atomic revision protocol, recoverable completion of interrupted file creation (metadata creation can succeed before byte upload fails), root schema validation, and a host-supported network transport that preserves cancellation. The unbundled prototype currently uses `fetch`; all shipped auth, Docs, and Tasks HTTP paths use Obsidian's `requestUrl`.
+Generated Drive IDs and payload identities are persisted before creation. Small files use multipart creation; large files use resumable uploads with session URLs stored as secrets. A retry verifies existing metadata and bytes before accepting an existing ID. Every blob is hash/size verified before publishing its record. All transport, auth, Docs, and Tasks HTTP paths use host-backed `requestUrl`; no renderer `fetch` transport remains. The current maximum file size is 100 MiB.
+
+These are integrity checks, not cryptographic authentication. Objects are immutable by client convention, not server-enforced retention; there are no signatures or end-to-end encryption. A fresh device cannot authenticate a coordinated rewrite by the Google account owner. Do not edit or prune the managed remote objects. Live two-client acceptance, fresh-client reconstruction, interruption testing, scale testing, and a 24-hour soak remain prerequisites to enabling this beta.
 
 OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
 

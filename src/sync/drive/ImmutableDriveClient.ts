@@ -27,6 +27,7 @@ export interface DriveJournal {
 }
 export interface ImmutableCreate {
   operationKey: string;
+  driveId?: string;
   metadata: ImmutableMetadata;
   data: ArrayBuffer;
   sha256: string;
@@ -51,11 +52,10 @@ export class ImmutableDriveClient {
       this.auth.assertCurrent(); signal.throwIfAborted();
       const prior = entries[input.operationKey];
       if (prior) {
-        if (prior.identity !== identity) throw new Error('Operation key reused for different immutable content');
+        if (prior.identity !== identity || (input.driveId && prior.id !== input.driveId)) throw new Error('Operation key reused for different immutable content');
         return prior;
       }
-      const response = await this.request({ url: `${DRIVE}/files/generateIds?count=1&space=drive&type=files` }, signal);
-      const id = response.json?.ids?.[0];
+      const id = input.driveId ?? (await this.request({ url: `${DRIVE}/files/generateIds?count=1&space=drive&type=files` }, signal)).json?.ids?.[0];
       if (typeof id !== 'string' || !/^[\w-]+$/.test(id)) throw new Error('Drive returned an invalid generated ID');
       const entry = { id, identity };
       this.auth.assertCurrent(); signal.throwIfAborted();
@@ -67,7 +67,10 @@ export class ImmutableDriveClient {
       await this.verify(reserved.id, input, signal, reserved.verifiedVersion);
       return reserved.id;
     }
-    if (input.data.byteLength > 5 * 1024 * 1024) await this.uploadResumable(input, reserved, signal);
+    if (input.metadata.mimeType === 'application/vnd.google-apps.folder') {
+      await this.request({ url: `${DRIVE}/files?fields=id`, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: reserved.id, ...input.metadata }) }, signal, [409]);
+    }
+    else if (input.data.byteLength > 5 * 1024 * 1024) await this.uploadResumable(input, reserved, signal);
     else await this.uploadMultipart(input, reserved.id, signal);
     const verifiedVersion = await this.verify(reserved.id, input, signal);
     await this.serial(async () => {
@@ -143,10 +146,11 @@ export class ImmutableDriveClient {
     const response = await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?fields=id,name,mimeType,parents,appProperties,size,trashed,version` }, signal);
     const actual = response.json;
     if (!actual || typeof actual.version !== 'string' || (expectedVersion && actual.version !== expectedVersion) || actual.id !== id || actual.trashed || actual.name !== expected.metadata.name || actual.mimeType !== expected.metadata.mimeType ||
-      canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents ?? []) ||
-      canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties) || Number(actual.size) !== expected.data.byteLength) {
+      (expected.metadata.parents && canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents)) ||
+      canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties) || (expected.metadata.mimeType !== 'application/vnd.google-apps.folder' && Number(actual.size) !== expected.data.byteLength)) {
       throw new Error('Immutable object integrity failure: metadata mismatch');
     }
+    if (expected.metadata.mimeType === 'application/vnd.google-apps.folder') return actual.version;
     const bytes = (await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?alt=media` }, signal)).arrayBuffer;
     if (bytes.byteLength !== expected.data.byteLength || await sha256Bytes(bytes) !== expected.sha256) throw new Error('Immutable object integrity failure: content mismatch');
     return actual.version;
