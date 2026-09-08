@@ -22,8 +22,8 @@ export interface ReservedObject {
   sessionSecretKey?: string;
 }
 export interface DriveJournal {
-  load(): Promise<Record<string, ReservedObject>>;
-  save(entries: Record<string, ReservedObject>): Promise<void>;
+  load(operationKey: string): Promise<ReservedObject | null>;
+  save(operationKey: string, entry: ReservedObject): Promise<void>;
 }
 export interface ImmutableCreate {
   operationKey: string;
@@ -38,19 +38,22 @@ export interface DriveClientOptions {
   sessions?: { load(key: string): Promise<string | null>; save(key: string, value: string): Promise<void>; remove(key: string): Promise<void> };
 }
 export class ImmutableDriveClient {
-  private queue: Promise<unknown> = Promise.resolve();
+  private queues = new Map<string, Promise<unknown>>();
   constructor(private auth: DriveAuth, private journal: DriveJournal, private options: DriveClientOptions = {}) {}
 
   async create(input: ImmutableCreate, signal: AbortSignal): Promise<string> {
+    return this.serial(input.operationKey, () => this.createReserved(input, signal));
+  }
+
+  private async createReserved(input: ImmutableCreate, signal: AbortSignal): Promise<string> {
     this.auth.assertCurrent();
     signal.throwIfAborted();
     if (input.data.byteLength > MAX_BLOB_SIZE) throw new Error('File exceeds the 100 MiB limit');
     if (await sha256Bytes(input.data) !== input.sha256) throw new Error('Input content hash mismatch');
     const identity = canonicalJson({ metadata: input.metadata, sha256: input.sha256, size: input.data.byteLength });
-    const reserved: ReservedObject = await this.serial(async () => {
-      const entries = await this.journal.load();
+    const reserved: ReservedObject = await (async () => {
+      const prior = await this.journal.load(input.operationKey);
       this.auth.assertCurrent(); signal.throwIfAborted();
-      const prior = entries[input.operationKey];
       if (prior) {
         if (prior.identity !== identity || (input.driveId && prior.id !== input.driveId)) throw new Error('Operation key reused for different immutable content');
         return prior;
@@ -59,9 +62,9 @@ export class ImmutableDriveClient {
       if (typeof id !== 'string' || !/^[\w-]+$/.test(id)) throw new Error('Drive returned an invalid generated ID');
       const entry = { id, identity };
       this.auth.assertCurrent(); signal.throwIfAborted();
-      await this.journal.save({ ...entries, [input.operationKey]: entry });
+      await this.journal.save(input.operationKey, entry);
       return entry;
-    });
+    })();
     signal.throwIfAborted();
     if (reserved.verifiedVersion) {
       await this.verify(reserved.id, input, signal, reserved.verifiedVersion);
@@ -73,11 +76,8 @@ export class ImmutableDriveClient {
     else if (input.data.byteLength > 5 * 1024 * 1024) await this.uploadResumable(input, reserved, signal);
     else await this.uploadMultipart(input, reserved.id, signal);
     const verifiedVersion = await this.verify(reserved.id, input, signal);
-    await this.serial(async () => {
-      const entries = await this.journal.load();
-      this.auth.assertCurrent(); signal.throwIfAborted();
-      await this.journal.save({ ...entries, [input.operationKey]: { id: reserved.id, identity: reserved.identity, verifiedVersion } });
-    });
+    this.auth.assertCurrent(); signal.throwIfAborted();
+    await this.journal.save(input.operationKey, { id: reserved.id, identity: reserved.identity, verifiedVersion });
     if (reserved.sessionSecretKey) await this.options.sessions?.remove(reserved.sessionSecretKey);
     return reserved.id;
   }
@@ -114,11 +114,7 @@ export class ImmutableDriveClient {
       await sessions.save(secretKey, url);
       this.auth.assertCurrent(); signal.throwIfAborted();
       reserved.sessionSecretKey = secretKey;
-      await this.serial(async () => {
-        const entries = await this.journal.load();
-        this.auth.assertCurrent(); signal.throwIfAborted();
-        await this.journal.save({ ...entries, [input.operationKey]: { ...reserved } });
-      });
+      await this.journal.save(input.operationKey, { ...reserved });
     }
     let recoveries = 0;
     while (offset < size) {
@@ -208,9 +204,11 @@ export class ImmutableDriveClient {
     });
   }
 
-  private serial<T>(work: () => Promise<T>): Promise<T> {
-    const run = this.queue.then(work, work);
-    this.queue = run.catch(() => undefined);
+  private serial<T>(key: string, work: () => Promise<T>): Promise<T> {
+    const run = (this.queues.get(key) ?? Promise.resolve()).then(work, work);
+    const settled = run.then(() => undefined, () => undefined);
+    this.queues.set(key, settled);
+    void settled.then(() => { if (this.queues.get(key) === settled) this.queues.delete(key); });
     return run;
   }
 }

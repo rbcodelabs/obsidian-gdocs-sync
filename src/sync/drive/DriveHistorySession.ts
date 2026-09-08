@@ -79,7 +79,7 @@ export class DriveHistorySession implements AppendOnlySession {
       }
       const page = response.json;
       for (const change of page.changes ?? []) {
-        const known = observations.objects[change.fileId];
+        const known = observations.objects[change.fileId] ?? await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(change.fileId));
         if (change.removed || change.file?.trashed) {
           if (known?.kind === 'record') push(integrityEvidence(known.recordId, 'Known immutable record was removed'));
           else if (known) throw new Error('Known immutable Drive blob was removed; history integrity requires attention');
@@ -135,18 +135,15 @@ export class DriveHistorySession implements AppendOnlySession {
 
   private async observe(meta: Metadata, hash: string, recordId: string | undefined, signal: AbortSignal): Promise<void> {
     await this.serial(async () => {
-      const state = await this.loadObservations();
-      const previous = state.objects[meta.id];
+      const previous = await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(meta.id));
       if (previous && (previous.version !== meta.version || previous.hash !== hash)) throw new Error('Known immutable object changed: integrity failure');
-      if (recordId && state.records[recordId] && state.records[recordId] !== hash) throw new Error('Logical record identity has conflicting immutable bytes');
-      state.objects[meta.id] = { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind };
-      if (recordId) state.records[recordId] = hash;
       this.check(signal);
-      await this.config.saveDeviceState(this.observationsKey(), state);
+      if (!previous) await this.config.saveDeviceState(this.blobObservationKey(meta.id), { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind });
       this.check(signal);
     });
   }
-  private observationsKey() { return `drive/observed/${this.accountId}/${this.binding.vaultId}`; }
+  private observationsKey() { return `drive/observed/${this.accountId}/${this.binding.vaultId}/${this.binding.rootId}/${this.binding.descriptorId}`; }
+  private blobObservationKey(id: string) { return `${this.observationsKey()}/blob/${encodeURIComponent(id)}`; }
   private async loadObservations(): Promise<Observations> { return await this.config.loadDeviceState<Observations>(this.observationsKey()) ?? { objects: {}, records: {} }; }
   private check(signal: AbortSignal): void { this.auth.assertCurrent(); this.closed.signal.throwIfAborted(); signal.throwIfAborted(); }
   private signal(signal: AbortSignal): AbortSignal { return AbortSignal.any([signal, this.closed.signal]); }

@@ -1,6 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 import { createHash } from 'node:crypto';
+import { mkdtemp, readFile, writeFile, rename } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { canonicalJson } from '../../src/sync/drive/ImmutableDriveClient';
 import { GoogleDriveSyncProvider } from '../../src/sync/GoogleDriveSyncProvider';
 import type { HistoryRecord } from 'geode';
@@ -65,6 +68,40 @@ const digest = (data: ArrayBuffer) => createHash('sha256').update(new Uint8Array
 
 describe('append-only Google Drive vaults', () => {
   beforeEach(() => { vi.mocked(requestUrl).mockReset(); vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Renderer fetch forbidden'); })); });
+  it('reports an incomplete setup root without hiding unrelated valid vaults', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    remote.files.set('pending-root', { meta: { ...remote.files.get(binding.rootId)!.meta, id: 'pending-root', appProperties: { ...remote.files.get(binding.rootId)!.meta.appProperties, geodeVaultId: uuid(90), geodeDescriptorId: 'missing' } }, bytes: new ArrayBuffer(0) });
+    const issues = vi.fn(); Object.assign(a.config, { onDiscoveryIssue: issues });
+    expect(await a.provider.discover(abort())).toEqual([binding]);
+    expect(issues).toHaveBeenCalledWith(expect.objectContaining({ rootId: 'pending-root' }));
+  });
+  it('keeps disk-backed upload, append and blob observation writes bounded per object', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const directory = await mkdtemp(join(tmpdir(), 'drive-journal-scale-'));
+    let totalBytes = 0; let maximumBytes = 0; let writes = 0;
+    a.config.loadDeviceState.mockImplementation(async <T,>(key: string): Promise<T | null> => {
+      try { return JSON.parse(await readFile(join(directory, createHash('sha256').update(key).digest('hex')), 'utf8')); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    });
+    a.config.saveDeviceState.mockImplementation(async (key, value) => {
+      const bytes = JSON.stringify(value); totalBytes += Buffer.byteLength(bytes); maximumBytes = Math.max(maximumBytes, Buffer.byteLength(bytes)); writes++;
+      const path = join(directory, createHash('sha256').update(key).digest('hex'));
+      await writeFile(`${path}.tmp`, bytes); await rename(`${path}.tmp`, path);
+    });
+    const binding = await a.provider.createVault({ name: 'Synthetic scale fixture', operationId: uuid(1) }, abort());
+    const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const count = Number(process.env.DRIVE_JOURNAL_BENCH_COUNT ?? 100); const started = performance.now();
+    const data = new Uint8Array([0, 255, 3, 9]).buffer;
+    for (let index = 0; index < count; index++) {
+      const blob = await session.putBlob({ operationId: uuid(index + 10), sha256: digest(data), size: data.byteLength, data }, abort());
+      await session.appendRecord({ schema: 1, vaultId: binding.vaultId, recordId: uuid(index + 10), operationId: uuid(index + 10), deviceId: uuid(2), entityId: uuid(index + 10), namespace: 'content', parents: [], kind: 'file', deleted: false, location: { parentId: null, name: 'fixture.bin' }, blob }, abort());
+      await session.readBlob(blob, abort());
+    }
+    expect(maximumBytes).toBeLessThan(2500);
+    expect(totalBytes).toBeLessThan(count * 6000 + 5000);
+    if (process.env.DRIVE_JOURNAL_BENCH_COUNT) process.stdout.write(`${JSON.stringify({ count, writes, totalBytes, maximumBytes, elapsedMs: Math.round(performance.now() - started), directory })}\n`);
+  }, 120000);
   it('verifies known records omitted by a listing instead of quarantining absence alone', async () => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
     const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
@@ -167,7 +204,7 @@ describe('append-only Google Drive vaults', () => {
     const originalSave = a.config.saveDeviceState.getMockImplementation()!;
     let blocked = true;
     a.config.saveDeviceState.mockImplementation(async (key, value) => {
-      if (blocked && Object.keys(value as object).some(key => key.startsWith('descriptor:'))) throw new Error('disk full');
+      if (blocked && key.includes('/descriptor%3A')) throw new Error('disk full');
       return originalSave(key, value);
     });
     await expect(a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort())).rejects.toThrow('disk full');

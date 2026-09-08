@@ -10,8 +10,8 @@ const signal = () => new AbortController().signal;
 const response = (status: number, json: unknown = {}, arrayBuffer = new ArrayBuffer(0), headers: Record<string,string> = {}) => ({ status, json, arrayBuffer, headers, text: '' });
 
 function fixture() {
-  let persisted: Record<string, ReservedObject> = {};
-  const journal = { load: vi.fn(async () => structuredClone(persisted)), save: vi.fn(async (state: Record<string, ReservedObject>) => { persisted = structuredClone(state); }) };
+  const persisted: Record<string, ReservedObject> = {};
+  const journal = { load: vi.fn(async (key: string) => structuredClone(persisted[key] ?? null)), save: vi.fn(async (key: string, state: ReservedObject) => { persisted[key] = structuredClone(state); }) };
   const auth = { assertCurrent: vi.fn(() => {}), getAccessToken: vi.fn(async () => 'synthetic-token'), refreshAccessToken: vi.fn(async () => 'synthetic-refreshed-token') };
   const sleep = vi.fn(async () => {});
   return { journal, auth, sleep, persisted: () => persisted, client: new ImmutableDriveClient(auth, journal, { sleep, random: () => 0 }) };
@@ -24,7 +24,19 @@ function respondCreated() {
 }
 
 describe('immutable Drive create', () => {
-  beforeEach(() => vi.mocked(requestUrl).mockReset());
+  beforeEach(() => { vi.mocked(requestUrl).mockReset(); });
+  it('persists bounded individual reservation records instead of growing-map snapshots', async () => {
+    const f = fixture();
+    for (let index = 0; index < 3; index++) {
+      respondCreated();
+      await f.client.create({ operationKey: `op-${index}`, metadata, data: bytes, sha256 }, signal());
+    }
+    for (const call of f.journal.save.mock.calls) {
+      expect(typeof call[0]).toBe('string');
+      expect(call[1]).toMatchObject({ id: 'reserved-id' });
+      expect(Object.keys(call[1])).not.toContain('op-0');
+    }
+  });
   it('refreshes authentication once and retries with the refreshed token', async () => {
     const f = fixture();
     vi.mocked(requestUrl).mockResolvedValueOnce(response(401) as never).mockResolvedValueOnce(response(200, { ok: true }) as never);

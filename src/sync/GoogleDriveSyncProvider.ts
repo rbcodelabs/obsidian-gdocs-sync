@@ -10,6 +10,7 @@ export interface DriveProviderConfig {
   saveSecret(key: string, value: string): Promise<void>;
   removeSecret(key: string): Promise<void>;
   excludePath?(path: string, data?: ArrayBuffer): string | null | Promise<string | null>;
+  onDiscoveryIssue?(issue: { rootId: string; message: string }): void;
 }
 
 /** Managed immutable history, not a mutable Drive folder mirror. Beta remains gated in main.ts. */
@@ -28,7 +29,14 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
     const context = await this.context(signal);
     const roots = await listFiles(context.client, `trashed=false and appProperties has { key='geodeSyncProtocol' and value='${PROTOCOL}' } and appProperties has { key='geodeObjectKind' and value='root' }`, signal);
     const result: VaultDescriptor[] = [];
+    const identities = new Set<string>();
     for (const root of roots) {
+      const identity = root.appProperties?.geodeVaultId;
+      if (identity && identities.has(identity)) throw new Error('Multiple Drive roots use the same vault identity; explicit repair is required');
+      if (identity) identities.add(identity);
+    }
+    for (const root of roots) {
+      try {
       const descriptorId = root.appProperties?.geodeDescriptorId;
       if (!descriptorId) throw new Error('Managed Drive root is missing its descriptor');
       const response = await context.client.request({ url: `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(descriptorId)}?alt=media` }, signal);
@@ -37,7 +45,12 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
       if (descriptor.rootId !== root.id) throw new Error('Drive descriptor root identity mismatch');
       if (result.some(item => item.vaultId === descriptor.vaultId)) throw new Error('Multiple Drive roots use the same vault identity; explicit repair is required');
       result.push(descriptor);
+      } catch {
+        context.auth.assertCurrent(); signal.throwIfAborted();
+        this.config.onDiscoveryIssue?.({ rootId: root.id, message: 'This managed root is incomplete or invalid. Retry setup or inspect its descriptor; it was not adopted or repaired.' });
+      }
     }
+    if (roots.length && !result.length) throw new Error('No valid managed vault descriptors were found; incomplete or invalid roots require attention');
     return result;
   }
 
@@ -60,7 +73,7 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
         // Account+operation lookup survives a crash without inventing a new vault UUID.
         await this.config.saveDeviceState(setupKey, binding);
       }
-      const client = this.client(context.auth, context.accountId, binding.vaultId, context.generation);
+      const client = this.client(context.auth, context.accountId, `${binding.vaultId}/${binding.rootId}/${binding.descriptorId}`, context.generation);
       const empty = new ArrayBuffer(0);
       await client.create({ operationKey: `root:${input.operationId}`, driveId: binding.rootId, metadata: { name: binding.name, mimeType: 'application/vnd.google-apps.folder', appProperties: { ...objectProperties(binding, 'root'), geodeDescriptorId: binding.descriptorId } }, data: empty, sha256: await sha256Bytes(empty) }, signal);
       const data = new TextEncoder().encode(canonicalJson(binding)).buffer;
@@ -73,7 +86,8 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
   async open(context: { binding: VaultDescriptor; deviceId: string }, signal: AbortSignal): Promise<AppendOnlySession> {
     if (!/^[\da-f-]{36}$/i.test(context.deviceId)) throw new Error('Invalid device identity');
     const account = await this.context(signal);
-    const client = this.client(account.auth, account.accountId, context.binding.vaultId, account.generation);
+    validateDescriptorShape(context.binding);
+    const client = this.client(account.auth, account.accountId, `${context.binding.vaultId}/${context.binding.rootId}/${context.binding.descriptorId}`, account.generation);
     await this.validateBinding(client, context.binding, signal);
     return new DriveHistorySession(client, structuredClone(context.binding), context.deviceId, account.accountId, this.config, account.auth, work => this.serial(work));
   }
@@ -98,7 +112,7 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
       getAccessToken: async () => { this.tokens.assertGeneration(generation); const token = await this.tokens.getValidAccessToken(); this.tokens.assertGeneration(generation); return token; },
       refreshAccessToken: async () => { this.tokens.assertGeneration(generation); const token = await this.tokens.getValidAccessToken(true); this.tokens.assertGeneration(generation); return token; },
     };
-    const probe = new ImmutableDriveClient(auth, { load: async () => ({}), save: async () => { throw new Error('Account probe cannot reserve objects'); } });
+    const probe = new ImmutableDriveClient(auth, { load: async () => null, save: async () => { throw new Error('Account probe cannot reserve objects'); } });
     const result = await probe.request({ url: 'https://www.googleapis.com/drive/v3/about?fields=user(permissionId)' }, signal);
     const accountId = result.json?.user?.permissionId;
     if (typeof accountId !== 'string' || !/^[\w-]+$/.test(accountId)) throw new Error('Google account identity is unavailable');
@@ -110,8 +124,8 @@ export class GoogleDriveSyncProvider implements AppendOnlySyncProvider {
     const cacheKey = `${generation}:${key}`;
     const previous = this.clients.get(cacheKey); if (previous) return previous;
     const journal: DriveJournal = {
-      load: async () => { auth.assertCurrent(); const value = await this.config.loadDeviceState<Record<string, import('./drive/ImmutableDriveClient').ReservedObject>>(key); auth.assertCurrent(); return value ?? {}; },
-      save: async value => { auth.assertCurrent(); await this.config.saveDeviceState(key, value); auth.assertCurrent(); },
+      load: async operationKey => { auth.assertCurrent(); const value = await this.config.loadDeviceState<import('./drive/ImmutableDriveClient').ReservedObject>(`${key}/${encodeURIComponent(operationKey)}`); auth.assertCurrent(); return value ?? null; },
+      save: async (operationKey, value) => { auth.assertCurrent(); await this.config.saveDeviceState(`${key}/${encodeURIComponent(operationKey)}`, value); auth.assertCurrent(); },
     };
     const client = new ImmutableDriveClient(auth, journal, { sessions: { load: key => this.config.loadSecret(key), save: (key, value) => this.config.saveSecret(key, value), remove: key => this.config.removeSecret(key) } });
     this.clients.set(cacheKey, client); return client;
