@@ -61,7 +61,7 @@ export async function createLiveAcceptance({ pages, pluginId, fixtureDirectory, 
   };
   let busy = false;
   const matrixPaths = ['rename-edit.md', 'renamed-edit.md', 'delete-edit.md'];
-  const invoke = async (index, command, extra = {}) => pages[index].evaluate(browserCommand, { command, pluginId, expectedRoot: openedRoots[index], rootName, ids: manifest.ids, bindings: manifest.bindings ?? {}, allowedConflictPaths: manifest.stages['rename-delete-edit']?.status === 'passed' ? matrixPaths : [], ...extra });
+  const invoke = async (index, command, extra = {}) => pages[index].evaluate(browserCommand, { command, pluginId, expectedRoot: openedRoots[index], rootName, ids: manifest.ids, bindings: manifest.bindings ?? {}, allowedConflictPaths: [], ...extra });
   const pin = async (key, descriptor) => {
     if (!descriptor || !/^[a-zA-Z0-9_-]+$/.test(descriptor.rootId) || !/^[a-zA-Z0-9_-]+$/.test(descriptor.descriptorId) || !/^[0-9a-f-]{36}$/.test(descriptor.vaultId) || descriptor.protocol !== 'append-only-history-v1' || descriptor.schema !== 1 || descriptor.name !== rootName + (key === 'primitive' ? '-primitive' : '')) throw new Error('Invalid fixture descriptor');
     const safe = Object.fromEntries(['schema', 'protocol', 'rootId', 'descriptorId', 'vaultId', 'name'].map(field => [field, descriptor[field]]));
@@ -127,6 +127,13 @@ export async function createLiveAcceptance({ pages, pluginId, fixtureDirectory, 
           for (const index of [0, 1, 0, 2]) await invoke(index, 'sync', { allowedConflictPaths: matrixPaths });
           const counts = await Promise.all(pages.map((_page, index) => invoke(index, 'matrix-conflicts')));
           if (counts.some(count => count < 2)) throw new Error('Rename/delete concurrent edits were not preserved');
+          await invoke(0, 'resolve');
+          for (let index = 0; index < 3; index++) await invoke(index, 'sync');
+          const snapshots = await Promise.all(pages.map((_page, index) => invoke(index, 'matrix-snapshot')));
+          const remaining = await Promise.all(pages.map((_page, index) => invoke(index, 'conflicts')));
+          const snapshot = snapshots[0], names = Object.keys(snapshot);
+          const renamed = names.filter(name => ['rename-edit.md', 'renamed-edit.md'].includes(name));
+          if (remaining.some(Boolean) || renamed.length !== 1 || names.some(name => !matrixPaths.includes(name)) || Object.values(snapshot).some(value => ![digest('Synthetic original'), digest('Synthetic offline edit')].includes(value)) || snapshots.some(value => JSON.stringify(value) !== JSON.stringify(snapshot))) throw new Error('Resolved matrix paths or bytes differ');
           evidence = { conflicts: counts };
         }
         if (stage === 'portable-config') {
@@ -247,6 +254,12 @@ async function browserCommand(input) {
   }
   if (input.command === 'matrix-move-delete') { await app.host.vaultFiles.rename('rename-edit.md', 'renamed-edit.md'); await app.host.vaultFiles.trash('delete-edit.md'); return; }
   if (input.command === 'matrix-conflicts') return (await sync.listConflicts()).filter(conflict => ['rename-edit.md', 'renamed-edit.md', 'delete-edit.md'].includes(conflict.path)).length;
+  if (input.command === 'matrix-snapshot') {
+    const scan = await app.host.vaultFiles.reconcileScan(); if (scan.status !== 'complete') throw new Error('Incomplete scan');
+    const result = {};
+    for (const entry of scan.entries.filter(entry => ['rename-edit.md', 'renamed-edit.md', 'delete-edit.md'].includes(entry.path)).sort((a, b) => a.path.localeCompare(b.path))) result[entry.path] = await hash(await app.host.vaultFiles.readBinary(entry.path));
+    return result;
+  }
   if (input.command === 'config-enable') return sync.updateScope({ mainSettings: true });
   if (input.command === 'config-edit') return app.vault.setConfig('readableLineLength', false);
   if (input.command === 'config-verify') return (await app.host.config.read('app'))?.readableLineLength === false && app.settings.readableLineLength === false;

@@ -125,3 +125,12 @@ test('matching bytes cannot pass a sync with pending integrity dependencies', ()
   const resumed = await createLiveAcceptance(options);
   await assert.rejects(resumed.runStage('soak'), /Acceptance stage failed/);
 }));
+
+test('matrix must resolve its branches and verify final paths before passing', () => fixture(async f => {
+  const options = { pages: f.pages, pluginId: 'qa-plugin', fixtureDirectory: f.directory, rootName: 'qa-synthetic' };
+  const initial = await createLiveAcceptance(options); await initial.runStage('interrupted-transfer');
+  const manifest = JSON.parse(await readFile(initial.manifestPath, 'utf8')); manifest.stages.clients = { status: 'passed' }; await writeFile(initial.manifestPath, JSON.stringify(manifest));
+  for (const page of f.pages) { const original = page.evaluate; page.evaluate = (fn, input) => input.command === 'inspect' ? original(fn, input) : Promise.resolve(input.command === 'matrix-conflicts' ? 2 : input.command === 'conflicts' ? 0 : input.command === 'matrix-snapshot' ? {} : undefined); }
+  const runner = await createLiveAcceptance(options);
+  await assert.rejects(runner.runStage('rename-delete-edit'), /Acceptance stage failed/);
+}));
