@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { installOAuthCapture } from './oauth-capture.mjs';
 import { createLiveAcceptance } from './live-acceptance.mjs';
 import { createLiveHooks } from './live-hooks.mjs';
+import { presentWindow } from './present-window.mjs';
 
 export const stageExitCode = status => ({ passed: 0, pending: 2, 'not-verified': 3, failed: 1 })[status] ?? 1;
 export function assertAccountProofs(proofs) {
@@ -116,7 +117,8 @@ export async function runAcceptance(options) {
       const connected = await client.page.evaluate(id => Boolean(window.app.pluginManager.getPlugin(id).tokenStore.get()), manifest.id);
       if (!connected) {
         await client.page.evaluate(id => window.app.setting.openTabById(id), manifest.id);
-        await client.electronApp.evaluate(({ BrowserWindow }) => { const view = BrowserWindow.getAllWindows()[0]; view.show(); view.focus(); });
+        try { await presentWindow(client.electronApp, index + 1); }
+        catch { process.stderr.write(`Client ${index + 1}: QA window presentation failed. Check macOS desktop/Spaces; no sign-in started.\n`); throw new Error('QA presentation failed'); }
         process.stdout.write(`Client ${index + 1}: click Connect in the isolated test window and authorize the selected disposable account.\n`);
         await client.page.waitForFunction(id => typeof window.app.pluginManager.getPlugin(id).qaAuthUrl === 'string', manifest.id, { timeout: 600000 });
         const start = await client.page.evaluate(id => window.app.pluginManager.getPlugin(id).qaAuthUrl, manifest.id);
