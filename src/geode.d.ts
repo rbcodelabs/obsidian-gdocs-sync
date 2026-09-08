@@ -21,7 +21,7 @@ declare module 'geode' {
     namespace: 'content' | 'portable-config'; parents: string[]; kind: 'file' | 'folder'; deleted: boolean;
     location: { parentId: string | null; name: string }; blob?: BlobRef;
   }
-  export interface HistoryScan { status: 'complete' | 'partial' | 'cancelled' | 'unavailable'; records: unknown[]; cursor?: string; reset?: boolean; }
+  export interface HistoryScan { status: 'complete' | 'partial' | 'cancelled' | 'unavailable'; records: unknown[]; cursor?: string; reset?: boolean; blobAvailability?: Array<{ id: string; status: 'available' | 'pending' | 'corrupt' }>; }
   export interface AppendOnlySession {
     scan(cursor: string | undefined, signal: AbortSignal): Promise<HistoryScan>;
     putBlob(input: { operationId: string; sha256: string; size: number; data: ArrayBuffer }, signal: AbortSignal): Promise<BlobRef>;

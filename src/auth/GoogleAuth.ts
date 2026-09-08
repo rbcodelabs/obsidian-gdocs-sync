@@ -31,6 +31,14 @@ export class GoogleAuth {
   // Holds the state UUID generated during connect() so the persistent
   // protocol handler (registered in onload) can verify it on return.
   private pendingState: string | null = null;
+  private generation = 0;
+  private writes: Promise<unknown> = Promise.resolve();
+
+  private serializeWrite<T>(write: () => Promise<T>): Promise<T> {
+    const next = this.writes.then(write, write);
+    this.writes = next.catch(() => undefined);
+    return next;
+  }
 
   // Called after successful auth so the settings tab can refresh its UI.
   onConnected: (() => void) | null = null;
@@ -59,7 +67,7 @@ export class GoogleAuth {
     }
 
     if (params['state'] !== this.pendingState) {
-      console.warn('[GDocsAuth] State mismatch. Expected:', this.pendingState, 'Got:', params['state']);
+      console.warn('[GDocsAuth] OAuth state mismatch; callback rejected.');
       new Notice('⚠ GDocs Sync: OAuth state mismatch. Auth cancelled.');
       return;
     }
@@ -83,11 +91,16 @@ export class GoogleAuth {
       refreshToken,
       expiresAt: Date.now() + expiresIn * 1000,
     };
-
-    console.log('[GDocsAuth] Saving tokens to TokenStore...');
-    await this.tokenStore.set(tokens);
-    console.log('[GDocsAuth] Tokens saved. Verifying readback:', !!this.tokenStore.get());
+    const generation = this.generation;
+    // Claim the callback before persistence so duplicate deliveries cannot race.
     this.pendingState = null;
+    console.log('[GDocsAuth] Saving tokens to TokenStore...');
+    await this.serializeWrite(async () => {
+      if (generation !== this.generation) return;
+      await this.tokenStore.set(tokens);
+    });
+    if (generation !== this.generation) return;
+    console.log('[GDocsAuth] Tokens saved. Verifying readback:', !!this.tokenStore.get());
 
     // Fetch the Google account email for display in settings
     try {
@@ -96,18 +109,22 @@ export class GoogleAuth {
         headers: { Authorization: `Bearer ${accessToken}` },
         throw: false,
       });
+      if (generation !== this.generation) return;
       if (isSuccessStatus(resp.status)) {
         const info = resp.json as { email?: string };
         if (info.email) {
-          this.plugin.settings.connectedEmail = info.email;
-          await this.plugin.saveSettings();
-          console.log('[GDocsAuth] Connected email set to:', info.email);
+          await this.serializeWrite(async () => {
+            if (generation !== this.generation) return;
+            this.plugin.settings.connectedEmail = info.email!;
+            await this.plugin.saveSettings();
+          });
+          if (generation !== this.generation) return;
         }
       }
-    } catch (e) {
-      console.warn('[GDocsAuth] Could not fetch user email (non-fatal):', e);
+    } catch {
+      console.warn('[GDocsAuth] Could not fetch user email (non-fatal).');
     }
-
+    if (generation !== this.generation) return;
     new Notice('✓ Connected to Google');
     console.log('[GDocsAuth] Calling onConnected callback...');
     this.onConnected?.();
@@ -115,25 +132,31 @@ export class GoogleAuth {
   }
 
   async connect(): Promise<void> {
+    const generation = ++this.generation;
     this.pendingState = crypto.randomUUID();
-    console.log('[GDocsAuth] connect() called. pendingState set to:', this.pendingState);
-    console.log('[GDocsAuth] authProxyUrl:', this.plugin.settings.authProxyUrl);
 
     const geodeHost = (window as unknown as { geode?: { host?: unknown } }).geode?.host;
     const authUrl = buildConnectUrl(this.plugin.settings.authProxyUrl, this.pendingState, geodeHost);
-    console.log('[GDocsAuth] Opening auth URL:', authUrl);
     // Use Electron's shell.openExternal so the URL opens in the user's default
     // browser with their normal profile — window.open() hands off to Chrome
     // without profile context, which causes it to open incognito.
     await this.openAuthUrl(authUrl);
-
+    if (generation !== this.generation) return;
     new Notice('Opening Google sign-in... Return here after authorizing.');
   }
 
   async disconnect(): Promise<void> {
-    await this.tokenStore.clear();
-    this.plugin.settings.connectedEmail = '';
-    await this.plugin.saveSettings();
+    const generation = ++this.generation;
+    this.pendingState = null;
+    // Finish any older settings snapshot before clearing both credential copies.
+    // New callbacks queue behind this clear, even if another connect has begun.
+    await this.serializeWrite(async () => {
+      await this.tokenStore.clear();
+      if (generation !== this.generation) return;
+      this.plugin.settings.connectedEmail = '';
+      await this.plugin.saveSettings();
+    });
+    if (generation !== this.generation) return;
     new Notice('Disconnected from Google.');
   }
 }

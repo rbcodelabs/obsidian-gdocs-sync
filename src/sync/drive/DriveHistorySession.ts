@@ -6,7 +6,7 @@ export const PROTOCOL = 'append-only-history-v1' as const;
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed,version';
 interface Metadata { id: string; name: string; mimeType: string; parents?: string[]; appProperties?: Record<string, string>; size?: string; trashed?: boolean; version: string; }
-interface Observations { objects: Record<string, { version: string; hash: string; recordId?: string; kind?: string }>; records: Record<string, string>; }
+interface Observations { objects: Record<string, { version: string; hash: string; recordId?: string; kind?: string; blob?: BlobRef; size?: number }>; records: Record<string, string>; }
 
 export class DriveHistorySession implements AppendOnlySession {
   private closed = new AbortController();
@@ -51,20 +51,33 @@ export class DriveHistorySession implements AppendOnlySession {
     }
     const records: unknown[] = [];
     const observations = await this.loadObservations();
+    const pendingKey = `${this.observationsKey()}/pending-blobs`;
+    const previousPending = await this.config.loadDeviceState<Record<string, BlobRef>>(pendingKey) ?? {};
+    const references = new Map<string, BlobRef>(Object.values(previousPending).map(ref => [ref.id, ref]));
+    const knownRefs = new Map<string, BlobRef>();
+    for (const object of Object.values(observations.objects)) if (object.blob) knownRefs.set(object.blob.id, object.blob);
+    const availability = new Map<string, 'available' | 'pending' | 'corrupt'>();
+    const addReference = (ref: BlobRef) => {
+      const previous = knownRefs.get(ref.id);
+      if (previous && (previous.sha256 !== ref.sha256 || previous.size !== ref.size)) availability.set(ref.id, 'corrupt');
+      knownRefs.set(ref.id, ref); references.set(ref.id, ref);
+    };
+    const read = async (entry: Metadata) => { const record = await this.readRecord(entry, signal, observations); const ref = observations.objects[entry.id]?.blob; if (ref) addReference(ref); return record; };
     const recordVariants = new Set<string>();
     const push = (record: unknown) => { const key = canonicalJson(record); if (!recordVariants.has(key)) { recordVariants.add(key); records.push(record); } };
     const reset = !token;
     if (!token) {
+      for (const ref of knownRefs.values()) references.set(ref.id, ref);
       token = (await this.client.request({ url: `${DRIVE}/changes/startPageToken?fields=startPageToken` }, combined)).json?.startPageToken;
       if (typeof token !== 'string') throw new Error('Drive did not return a changes token');
       const entries = await listFiles(this.client, `'${this.binding.rootId}' in parents and trashed=false and appProperties has { key='geodeObjectKind' and value='record' }`, combined);
-      for (const entry of entries) push(await this.readRecord(entry, signal, observations));
+      for (const entry of entries) push(await read(entry));
       const present = new Set(entries.map(entry => entry.id));
       for (const [id, known] of Object.entries(observations.objects)) {
         if (known.kind === 'record' && !present.has(id)) {
           const response = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?fields=${FIELDS}` }, combined, [404]);
           if (response.status === 404) push(integrityEvidence(known.recordId, 'Known immutable record is no longer accessible'));
-          else push(await this.readRecord(response.json, signal, observations));
+          else push(await read(response.json));
         }
       }
     }
@@ -82,19 +95,25 @@ export class DriveHistorySession implements AppendOnlySession {
         const known = observations.objects[change.fileId] ?? await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(change.fileId));
         if (change.removed || change.file?.trashed) {
           if (known?.kind === 'record') push(integrityEvidence(known.recordId, 'Known immutable record was removed'));
-          else if (known) throw new Error('Known immutable Drive blob was removed; history integrity requires attention');
+          else if (known) { availability.set(change.fileId, 'pending'); const ref = knownRefs.get(change.fileId); if (ref) references.set(ref.id, ref); }
           continue;
         }
         if (known && (change.file?.version !== known.version || !change.file?.parents?.includes(this.binding.rootId) || change.file?.appProperties?.geodeObjectKind !== known.kind || change.file?.appProperties?.geodeVaultId !== this.binding.vaultId || change.file?.appProperties?.geodeSyncProtocol !== PROTOCOL || change.file?.appProperties?.geodeSyncSchema !== '1')) {
           if (known.kind === 'record') { push(integrityEvidence(known.recordId, 'Known immutable record changed or moved')); continue; }
-          throw new Error('Known immutable Drive blob changed: integrity failure');
+          availability.set(change.fileId, 'corrupt'); continue;
         }
         if (change.file?.parents?.includes(this.binding.rootId) && change.file?.appProperties?.geodeObjectKind === 'record') {
-          push(await this.readRecord(change.file, signal, observations));
+          push(await read(change.file));
         }
       }
       if (page.nextPageToken) { next = page.nextPageToken; continue; }
       if (typeof page.newStartPageToken !== 'string') throw new Error('Drive changes response omitted its terminal cursor');
+      const pending: Record<string, BlobRef> = {};
+      for (const ref of references.values()) {
+        this.check(signal);
+        const state = availability.get(ref.id) === 'corrupt' ? 'corrupt' : await this.blobAvailability(ref, signal);
+        availability.set(ref.id, state); if (state === 'pending') pending[ref.id] = ref;
+      }
       this.check(signal);
       await this.serial(async () => {
         const latest = await this.loadObservations();
@@ -104,8 +123,10 @@ export class DriveHistorySession implements AppendOnlySession {
           latest.objects[id] = candidate;
         }
         this.check(signal); await this.config.saveDeviceState(this.observationsKey(), latest); this.check(signal);
+        if (Object.keys(pending).length || Object.keys(previousPending).length) await this.config.saveDeviceState(pendingKey, pending);
+        this.check(signal);
       });
-      return { status: 'complete', records, reset, cursor: JSON.stringify({ accountId: this.accountId, vaultId: this.binding.vaultId, rootId: this.binding.rootId, token: page.newStartPageToken }) };
+      return { status: 'complete', records, reset, blobAvailability: [...availability].map(([id, status]) => ({ id, status })), cursor: JSON.stringify({ accountId: this.accountId, vaultId: this.binding.vaultId, rootId: this.binding.rootId, token: page.newStartPageToken }) };
     }
   }
 
@@ -125,6 +146,7 @@ export class DriveHistorySession implements AppendOnlySession {
       const text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       const record = JSON.parse(text) as HistoryRecord;
       if (text !== canonicalJson(record) || record?.recordId !== recordId) return integrityEvidence(recordId, 'Record is not canonical or its identity differs');
+      if (record.blob) { try { validateBlob(record.blob); observations.objects[meta.id].blob = structuredClone(record.blob); } catch { /* Core retains and quarantines the malformed raw record. */ } }
       return record;
     } catch { return integrityEvidence(recordId, 'Record JSON is malformed'); }
   }
@@ -133,12 +155,27 @@ export class DriveHistorySession implements AppendOnlySession {
     if (meta.trashed || !meta.parents?.includes(this.binding.rootId) || meta.appProperties?.geodeVaultId !== this.binding.vaultId || meta.appProperties?.geodeSyncSchema !== '1' || meta.appProperties?.geodeSyncProtocol !== PROTOCOL || meta.appProperties?.geodeObjectKind !== kind || typeof meta.version !== 'string') throw new Error('Managed object identity integrity failure');
   }
 
+  private async blobAvailability(ref: BlobRef, signal: AbortSignal): Promise<'available' | 'pending' | 'corrupt'> {
+    const response = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?fields=${FIELDS}` }, this.signal(signal), [404]);
+    if (response.status === 404 || response.json?.trashed) return 'pending';
+    const meta = response.json as Metadata;
+    try { this.validateObject(meta, 'blob'); } catch { return 'corrupt'; }
+    if (Number(meta.size) !== ref.size || meta.appProperties?.geodeSha256 !== ref.sha256) return 'corrupt';
+    const previous = await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(ref.id)); this.check(signal);
+    if (previous) return previous.version === meta.version && previous.hash === ref.sha256 ? 'available' : 'corrupt';
+    const content = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, this.signal(signal), [404]);
+    if (content.status === 404) return 'pending';
+    if (content.arrayBuffer.byteLength !== ref.size || await sha256Bytes(content.arrayBuffer) !== ref.sha256) return 'corrupt';
+    await this.observe(meta, ref.sha256, undefined, signal);
+    return 'available';
+  }
+
   private async observe(meta: Metadata, hash: string, recordId: string | undefined, signal: AbortSignal): Promise<void> {
     await this.serial(async () => {
       const previous = await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(meta.id));
       if (previous && (previous.version !== meta.version || previous.hash !== hash)) throw new Error('Known immutable object changed: integrity failure');
       this.check(signal);
-      if (!previous) await this.config.saveDeviceState(this.blobObservationKey(meta.id), { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind });
+      if (!previous) await this.config.saveDeviceState(this.blobObservationKey(meta.id), { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind, size: Number(meta.size) });
       this.check(signal);
     });
   }

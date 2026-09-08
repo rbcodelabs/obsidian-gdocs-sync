@@ -97,7 +97,11 @@ Device-local operation journals use independent, fully scoped records to avoid g
 
 These are integrity checks, not cryptographic authentication. Objects are immutable by client convention, not server-enforced retention; there are no signatures or end-to-end encryption. A fresh device cannot authenticate a coordinated rewrite by the Google account owner. Do not edit or prune the managed remote objects. Live two-client acceptance, fresh-client reconstruction, interruption testing, scale testing, and a 24-hour soak remain prerequisites to enabling this beta.
 
+Cursor resets recheck referenced blobs instead of treating a completed listing as proof that content is intact. Missing blobs produce retryable, scoped pending evidence; changed immutable blobs produce corruption evidence. Neither becomes a deletion record. New references are verified even when a receiving device already has matching local bytes.
+
 OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
+
+Disconnect invalidates outstanding sign-in callbacks and orders credential cleanup after earlier authentication settings writes, preventing a delayed callback or save from restoring the disconnected account.
 
 On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode. Test full-vault activation only to confirm the unavailable explanation; there is no supported Drive vault synchronization flow in this delivery.
 

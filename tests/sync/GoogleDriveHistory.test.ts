@@ -66,10 +66,81 @@ const abort = () => new AbortController().signal;
 const uuid = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 const digest = (data: ArrayBuffer) => createHash('sha256').update(new Uint8Array(data)).digest('hex');
 
+async function preparedFolders() {
+  const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+  const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+  const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+  for (const index of [10, 20]) await writer.appendRecord({ schema: 1, vaultId: binding.vaultId, recordId: uuid(index), operationId: uuid(index + 1), deviceId: uuid(2), entityId: uuid(index + 2), namespace: 'content', parents: [], kind: 'folder', deleted: false, location: { parentId: null, name: `folder-${index}` } }, abort());
+  const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(3) }, abort());
+  return { remote, binding, reader, b, entries: [...remote.files.values()].filter(value => value.meta.appProperties?.geodeObjectKind === 'record').map(value => value.meta) };
+}
+
 describe('append-only Google Drive vaults', () => {
   const fixtureDirectories: string[] = [];
   afterEach(async () => { await Promise.all(fixtureDirectories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
   beforeEach(() => { vi.mocked(requestUrl).mockReset(); vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Renderer fetch forbidden'); })); });
+  it('unions every files and changes page before accepting a terminal cursor', async () => {
+    const f = await preparedFolders(); const pages: string[] = [];
+    vi.mocked(requestUrl).mockImplementation(async arg => {
+      const url = new URL((arg as RequestUrlParam).url); const response = await f.remote.handler(arg as RequestUrlParam);
+      if (url.pathname.endsWith('/files')) { pages.push(`files:${url.searchParams.get('pageToken')}`); return { ...response, json: url.searchParams.has('pageToken') ? { files: [f.entries[1]] } : { files: [f.entries[0]], nextPageToken: 'files-next' } } as never; }
+      if (url.pathname.endsWith('/changes')) { pages.push(`changes:${url.searchParams.get('pageToken')}`); return { ...response, json: url.searchParams.get('pageToken') === 'changes-next' ? { changes: [{ fileId: f.entries[1].id, file: f.entries[1] }], newStartPageToken: 'terminal' } : { changes: [{ fileId: f.entries[0].id, file: f.entries[0] }], nextPageToken: 'changes-next' } } as never; }
+      return response;
+    });
+    const scan = await f.reader.scan(undefined, abort()); expect(scan.records).toHaveLength(2); expect(JSON.parse(scan.cursor!).token).toBe('terminal');
+    expect(pages).toEqual(['files:null', 'files:files-next', 'changes:4', 'changes:changes-next']);
+  });
+  it.each(['files-repeat', 'changes-repeat', 'files-failure', 'changes-failure'])('does not persist a scan or accept its cursor after %s on a later page', async mode => {
+    const f = await preparedFolders();
+    vi.mocked(requestUrl).mockImplementation(async arg => {
+      const url = new URL((arg as RequestUrlParam).url); const response = await f.remote.handler(arg as RequestUrlParam);
+      const endpoint = mode.startsWith('files') ? '/files' : '/changes';
+      if (!url.pathname.endsWith(endpoint)) return response;
+      const next = url.searchParams.get('pageToken') === 'next';
+      if (next && mode.endsWith('failure')) return { ...response, status: 400 } as never;
+      return { ...response, json: endpoint === '/files' ? { files: [f.entries[0]], nextPageToken: 'next' } : { changes: [{ fileId: f.entries[0].id, file: f.entries[0] }], nextPageToken: 'next' } } as never;
+    });
+    await expect(f.reader.scan(undefined, abort())).rejects.toThrow();
+    expect(f.b.config.saveDeviceState.mock.calls.filter(([key]) => key.includes('/observed/'))).toHaveLength(0);
+  });
+  it('rejects a late read response after the session closes without persisting observations', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort()); const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const data = new TextEncoder().encode('synthetic').buffer; const blob = await writer.putBlob({ operationId: uuid(3), sha256: digest(data), size: data.byteLength, data }, abort());
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(4) }, abort());
+    let release!: () => void; let arrived!: () => void; const started = new Promise<void>(resolve => { arrived = resolve; }); const delayed = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(requestUrl).mockImplementation(async arg => { if ((arg as RequestUrlParam).url.includes(`${blob.id}?alt=media`)) { arrived(); await delayed; } return remote.handler(arg as RequestUrlParam); });
+    const result = reader.readBlob(blob, abort()); const rejected = expect(result).rejects.toThrow(); await started; await reader.close(); release(); await rejected;
+    expect(b.config.saveDeviceState).not.toHaveBeenCalled();
+  });
+  it('reports missing blob dependencies on reset and clears pending evidence after visibility returns', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort()); const data = new TextEncoder().encode('synthetic').buffer;
+    const blob = await writer.putBlob({ operationId: uuid(3), sha256: digest(data), size: data.byteLength, data }, abort());
+    const record: HistoryRecord = { schema: 1, vaultId: binding.vaultId, recordId: uuid(4), operationId: uuid(3), deviceId: uuid(2), entityId: uuid(5), namespace: 'content', parents: [], kind: 'file', deleted: false, location: { parentId: null, name: 'file.bin' }, blob };
+    await writer.appendRecord(record, abort());
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(6) }, abort()); await reader.scan(undefined, abort());
+    const saved = remote.files.get(blob.id)!; remote.files.delete(blob.id);
+    const reset = await reader.scan(undefined, abort());
+    expect(reset.blobAvailability).toContainEqual({ id: blob.id, status: 'pending' });
+    expect(reset.records).toContainEqual(record);
+    remote.files.set(blob.id, saved);
+    const recovered = await reader.scan(reset.cursor, abort());
+    expect(recovered.blobAvailability).toContainEqual({ id: blob.id, status: 'available' });
+  });
+  it('observes new referenced blobs even when the receiver never calls readBlob', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort()); const data = new TextEncoder().encode('synthetic').buffer;
+    const blob = await writer.putBlob({ operationId: uuid(3), sha256: digest(data), size: data.byteLength, data }, abort());
+    await writer.appendRecord({ schema: 1, vaultId: binding.vaultId, recordId: uuid(4), operationId: uuid(3), deviceId: uuid(2), entityId: uuid(5), namespace: 'content', parents: [], kind: 'file', deleted: false, location: { parentId: null, name: 'file.bin' }, blob }, abort());
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(6) }, abort()); const initial = await reader.scan(undefined, abort());
+    const changed = remote.files.get(blob.id)!; changed.meta.version = '2';
+    remote.changes.push({ sequence: 100, fileId: blob.id, file: changed.meta });
+    const next = await reader.scan(initial.cursor, abort());
+    expect(next.blobAvailability).toContainEqual({ id: blob.id, status: 'corrupt' });
+  });
   it('reports an incomplete setup root without hiding unrelated valid vaults', async () => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
     const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
