@@ -279,7 +279,17 @@ async function browserCommand(input) {
     const network = app.host.network, original = network.request; let requests = 0;
     network.request = function (...args) { requests++; return original.apply(this, args); };
     try {
-      await sync.preview(); await sync.run({ approvePreview: true });
+      const deadline = Date.now() + 120000;
+      for (;;) {
+        if (app.vault.root !== input.expectedRoot || app.pluginManager.getPlugin(input.pluginId)?.qaProvider !== provider) throw new Error('Fixture changed while waiting');
+        try { await sync.preview(); await sync.run({ approvePreview: true }); break; }
+        catch (error) {
+          // Startup restoration and the scheduler share the same exclusive controller.
+          // Only this exact pre-entry rejection is safe to retry; no failed operation is replayed here.
+          if (error?.message !== 'Sync already running or disconnecting' || Date.now() >= deadline) throw error;
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+      }
       const details = sync.getHistoryDetails(), status = sync.getStatus();
       if (!details || details.pending || details.blocked.length || details.excluded.length || !['idle', 'conflict'].includes(status.state) || details.conflicts.some(conflict => !input.allowedConflictPaths.includes(conflict.path))) throw new Error('Sync has unexpected blocked or unresolved state');
       return requests;

@@ -108,6 +108,7 @@ for (const stage of ['soak', 'scale', 'large-file']) test(`${stage} rejects matc
 }));
 
 test('matching bytes cannot pass a sync with pending integrity dependencies', () => fixture(async f => {
+  const qaProvider = {};
   const options = { pages: f.pages, pluginId: 'qa-plugin', fixtureDirectory: f.directory, rootName: 'qa-synthetic' };
   const first = await createLiveAcceptance(options); await first.runStage('interrupted-transfer');
   const manifest = JSON.parse(await readFile(first.manifestPath, 'utf8')); manifest.stages.clients = { status: 'passed' }; await writeFile(first.manifestPath, JSON.stringify(manifest));
@@ -118,7 +119,7 @@ test('matching bytes cannot pass a sync with pending integrity dependencies', ()
       if (input.command === 'hashes') return [createHash('sha256').update('Synthetic fixture 0 0').digest('hex')];
       if (input.command !== 'sync') return;
       const previous = globalThis.window;
-      globalThis.window = { app: { vault: { root: join(f.directory, `vault-${index}`) }, pluginManager: { getPlugin: () => ({ qaProvider: {} }) }, host: { network: { request() {} } }, sync: { preview: async () => {}, run: async () => {}, getStatus: () => ({ state: 'error' }), getHistoryDetails: () => ({ pending: 1, blocked: [], excluded: [], conflicts: [] }) } } };
+      globalThis.window = { app: { vault: { root: join(f.directory, `vault-${index}`) }, pluginManager: { getPlugin: () => ({ qaProvider }) }, host: { network: { request() {} } }, sync: { preview: async () => {}, run: async () => {}, getStatus: () => ({ state: 'error' }), getHistoryDetails: () => ({ pending: 1, blocked: [], excluded: [], conflicts: [] }) } } };
       try { return await fn(input); } finally { globalThis.window = previous; }
     };
   }
@@ -133,4 +134,30 @@ test('matrix must resolve its branches and verify final paths before passing', (
   for (const page of f.pages) { const original = page.evaluate; page.evaluate = (fn, input) => input.command === 'inspect' ? original(fn, input) : Promise.resolve(input.command === 'matrix-conflicts' ? 2 : input.command === 'conflicts' ? 0 : input.command === 'matrix-snapshot' ? {} : undefined); }
   const runner = await createLiveAcceptance(options);
   await assert.rejects(runner.runStage('rename-delete-edit'), /Acceptance stage failed/);
+}));
+
+for (const busy of [true, false]) test(busy ? 'startup and scheduler busy transitions are retried before accepting sync' : 'authentication errors are never retried as busy transitions', () => fixture(async f => {
+  const options = { pages: f.pages, pluginId: 'qa-plugin', fixtureDirectory: f.directory, rootName: 'qa-synthetic' };
+  const first = await createLiveAcceptance(options); await first.runStage('interrupted-transfer');
+  const manifest = JSON.parse(await readFile(first.manifestPath, 'utf8')); manifest.stages.clients = { status: 'passed' }; await writeFile(first.manifestPath, JSON.stringify(manifest));
+  let previews = 0, runs = 0;
+  const qaProvider = {};
+  for (let index = 0; index < f.pages.length; index++) {
+    const page = f.pages[index], original = page.evaluate;
+    page.evaluate = async (fn, input) => {
+      if (input.command === 'inspect') return original(fn, input);
+      if (input.command === 'hashes') return [createHash('sha256').update('Synthetic fixture 0 0').digest('hex')];
+      if (input.command !== 'sync') return;
+      const previous = globalThis.window;
+      globalThis.window = { app: { vault: { root: join(f.directory, `vault-${index}`) }, pluginManager: { getPlugin: () => ({ qaProvider }) }, host: { network: { request() {} } }, sync: {
+        preview: async () => { if (++previews === 1) throw new Error(busy ? 'Sync already running or disconnecting' : 'Account identity changed'); },
+        run: async () => { if (++runs === 1) throw new Error('Sync already running or disconnecting'); },
+        getStatus: () => ({ state: 'idle' }), getHistoryDetails: () => ({ pending: 0, blocked: [], excluded: [], conflicts: [] }),
+      } } };
+      try { return await fn(input); } finally { globalThis.window = previous; }
+    };
+  }
+  const runner = await createLiveAcceptance(options);
+  if (busy) { assert.equal((await runner.runStage('soak')).status, 'not-verified'); assert.equal(previews, 5); assert.equal(runs, 4); }
+  else { await assert.rejects(runner.runStage('soak'), /failed/); assert.equal(previews, 1); assert.equal(runs, 0); }
 }));

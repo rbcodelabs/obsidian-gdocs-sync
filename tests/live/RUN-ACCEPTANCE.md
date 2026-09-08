@@ -22,6 +22,8 @@ The launch receipt pins both repositories' source commit IDs and SHA-256 digests
 
 Exit codes are explicit: `0` passed, `1` failed/invalid launch, `2` pending (including an unfinished soak), and `3` not verified. Neither an unfinished nor unverified gate reports a successful process exit.
 
+Manual stage sync waits up to two minutes through the host's exact pre-entry “Sync already running or disconnecting” rejection, which can occur during startup restore or background polling. It rechecks fixture identity before retrying. All other errors—including authentication and integrity failures—stop the stage immediately; a long-running restore beyond that bound requires explicit retry after inspection.
+
 `large-file` transfers a 100 MiB binary. `scale` creates 10,000 files. The two authorization flags include permission for the named stage's synthetic remote writes; do not invoke these expensive stages without the account owner's approval. `interrupted-transfer` intentionally kills **only** a validated test Electron child during an observed upload chunk and relaunches the same private profile. The soak hook performs one observed offline-request rejection plus owned-process restart, then reuses that evidence—not continuous offline coverage.
 
 Invoke `soak --resume` hourly using the same full flags and paths. The command performs one tick and exits; it does not schedule itself. Passing requires at least 25 ticks over 24 hours, no gap above 90 minutes, verified expected bytes on all clients, and the successful offline/restart hook. Missing ticks or hook failures are not a pass. See `LIVE-ACCEPTANCE.md` and `LIVE-HOOKS.md` for exact evidence semantics.
