@@ -11,6 +11,8 @@ export class DriveBrowserModal extends Modal {
   private breadcrumbs: DriveItem[] = [];
   private items: DriveItem[] = [];
   private loading = false;
+  private loadSequence = 0;
+  private loadError = '';
   private selectedItem: DriveItem | null = null;
   private vaultDestination = '';
 
@@ -40,6 +42,7 @@ export class DriveBrowserModal extends Modal {
   }
 
   onClose() {
+    this.loadSequence++;
     this.contentEl.empty();
   }
 
@@ -65,6 +68,8 @@ export class DriveBrowserModal extends Modal {
    * like a normal folder id.
    */
   private loadTopLevel() {
+    const sequence = ++this.loadSequence;
+    this.loadError = '';
     this.loading = true;
     this.selectedItem = null;
     this.breadcrumbs = [];
@@ -75,6 +80,7 @@ export class DriveBrowserModal extends Modal {
     this.renderCTA();
 
     this.plugin.api.listSharedDrives().then(drives => {
+      if (sequence !== this.loadSequence) return;
       const myDrive: DriveItem = {
         id: 'root',
         name: 'My Drive',
@@ -92,6 +98,7 @@ export class DriveBrowserModal extends Modal {
       this.renderList();
       this.renderCTA();
     }).catch(err => {
+      if (sequence !== this.loadSequence) return;
       // Still surface "My Drive" so browsing isn't blocked entirely if the
       // Shared Drives lookup fails (e.g. transient error, no Shared Drive
       // membership support on the account).
@@ -109,6 +116,9 @@ export class DriveBrowserModal extends Modal {
   }
 
   private loadFolder(folderId: string, folderItem?: DriveItem) {
+    const sequence = ++this.loadSequence;
+    this.items = [];
+    this.loadError = '';
     this.loading = true;
     this.selectedItem = null;
     this.currentFolderId = folderId;
@@ -119,12 +129,15 @@ export class DriveBrowserModal extends Modal {
     this.renderCTA();
 
     this.plugin.api.listFolderContents(folderId).then(items => {
+      if (sequence !== this.loadSequence) return;
       this.items = items;
       this.loading = false;
       this.renderList();
       this.renderCTA();
     }).catch(err => {
+      if (sequence !== this.loadSequence) return;
       this.loading = false;
+      this.loadError = 'Unable to load this folder. Use the breadcrumbs to go back and try again.';
       new Notice('Failed to load Drive folder: ' + (err?.message ?? err));
       this.renderList();
     });
@@ -141,6 +154,7 @@ export class DriveBrowserModal extends Modal {
     rootSpan.style.cursor = 'pointer';
     rootSpan.style.textDecoration = 'underline';
     rootSpan.addEventListener('click', () => this.resetToRoot());
+    this.enableKeyboardClick(rootSpan);
 
     this.breadcrumbs.forEach((crumb, i) => {
       this.breadcrumbEl.createEl('span', { text: ' › ' });
@@ -152,9 +166,21 @@ export class DriveBrowserModal extends Modal {
         span.style.cursor = 'pointer';
         span.style.textDecoration = 'underline';
         span.addEventListener('click', () => {
-          this.breadcrumbs = this.breadcrumbs.slice(0, i); // pop back to this level
+          this.breadcrumbs = this.breadcrumbs.slice(0, i + 1);
           this.loadFolder(crumb.id);
         });
+        this.enableKeyboardClick(span);
+      }
+    });
+  }
+
+  private enableKeyboardClick(el: HTMLElement) {
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.addEventListener('keydown', event => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        el.click();
       }
     });
   }
@@ -164,6 +190,11 @@ export class DriveBrowserModal extends Modal {
 
     if (this.loading) {
       this.listEl.createEl('p', { text: '⏳ Loading…', cls: 'gdocs-loading' });
+      return;
+    }
+
+    if (this.loadError) {
+      this.listEl.createEl('p', { text: this.loadError, cls: 'gdocs-error' });
       return;
     }
 
@@ -188,6 +219,21 @@ export class DriveBrowserModal extends Modal {
 
       row.createEl('span', { text: icon });
       row.createEl('span', { text: item.name });
+
+      if (isSelectable || isFolder) {
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-label', item.name);
+        row.addEventListener('keydown', event => {
+          if (event.key === 'Enter' && isFolder) {
+            event.preventDefault();
+            this.loadFolder(item.id, item);
+          } else if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            row.click();
+          }
+        });
+      }
 
       if (isSelectable) {
         row.addEventListener('click', () => {
@@ -218,9 +264,6 @@ export class DriveBrowserModal extends Modal {
         // In doc mode, folders are still navigable but not selectable
         row.style.cursor = 'pointer';
         row.style.opacity = '1';
-        row.addEventListener('dblclick', () => {
-          this.loadFolder(item.id, item);
-        });
         // Single click on folder in doc mode: navigate in
         row.addEventListener('click', () => {
           this.loadFolder(item.id, item);
