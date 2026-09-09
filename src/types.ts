@@ -44,6 +44,17 @@ export interface DriveItem {
   modifiedTime: string;
 }
 
+/**
+ * A corporate Shared Drive (a.k.a. Team Drive) the connected account belongs to.
+ * A Shared Drive's id behaves like a folder id for `'<id>' in parents` queries
+ * against its root, so it can be browsed/imported through the same
+ * listFolderContents/listDocsInFolder/getFolderName machinery as a regular folder.
+ */
+export interface SharedDrive {
+  id: string;
+  name: string;
+}
+
 export interface GDocsPluginSettings {
   authProxyUrl: string;       // e.g. https://gdocs-sync.vercel.app
   syncTag: string;            // e.g. "gdocs-sync"

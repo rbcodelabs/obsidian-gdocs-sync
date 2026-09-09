@@ -36,7 +36,7 @@ export class DriveBrowserModal extends Modal {
     contentEl.addClass('gdocs-drive-browser');
     this.setTitle(this.mode === 'folder' ? 'Select a Drive Folder to Sync' : 'Browse Google Drive');
     this.renderShell();
-    this.loadFolder('root');
+    this.loadTopLevel();
   }
 
   onClose() {
@@ -54,6 +54,58 @@ export class DriveBrowserModal extends Modal {
     this.listEl.style.marginTop = '8px';
     this.ctaEl = contentEl.createDiv({ cls: 'gdocs-drive-cta' });
     this.ctaEl.style.marginTop = '12px';
+  }
+
+  /**
+   * Loads the virtual top level shown above "My Drive": a synthetic "My Drive"
+   * entry plus every Shared Drive the connected account belongs to. Both kinds
+   * of row are given the folder mimeType so they render with the folder icon
+   * and are navigable through the existing renderList() click/dblclick
+   * handlers unchanged — a Shared Drive's id slots into loadFolder() exactly
+   * like a normal folder id.
+   */
+  private loadTopLevel() {
+    this.loading = true;
+    this.selectedItem = null;
+    this.breadcrumbs = [];
+    this.currentFolderId = 'top-level';
+
+    this.renderBreadcrumbs();
+    this.renderList();   // shows spinner immediately
+    this.renderCTA();
+
+    this.plugin.api.listSharedDrives().then(drives => {
+      const myDrive: DriveItem = {
+        id: 'root',
+        name: 'My Drive',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '',
+      };
+      const sharedDriveItems: DriveItem[] = drives.map(drive => ({
+        id: drive.id,
+        name: drive.name,
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '',
+      }));
+      this.items = [myDrive, ...sharedDriveItems];
+      this.loading = false;
+      this.renderList();
+      this.renderCTA();
+    }).catch(err => {
+      // Still surface "My Drive" so browsing isn't blocked entirely if the
+      // Shared Drives lookup fails (e.g. transient error, no Shared Drive
+      // membership support on the account).
+      this.items = [{
+        id: 'root',
+        name: 'My Drive',
+        mimeType: 'application/vnd.google-apps.folder',
+        modifiedTime: '',
+      }];
+      this.loading = false;
+      new Notice('Failed to load Shared Drives: ' + (err?.message ?? err));
+      this.renderList();
+      this.renderCTA();
+    });
   }
 
   private loadFolder(folderId: string, folderItem?: DriveItem) {
@@ -79,15 +131,13 @@ export class DriveBrowserModal extends Modal {
   }
 
   private resetToRoot() {
-    this.breadcrumbs = [];
-    this.selectedItem = null;
-    this.loadFolder('root');
+    this.loadTopLevel();
   }
 
   private renderBreadcrumbs() {
     this.breadcrumbEl.empty();
 
-    const rootSpan = this.breadcrumbEl.createEl('span', { text: 'My Drive', cls: 'gdocs-crumb gdocs-crumb-link' });
+    const rootSpan = this.breadcrumbEl.createEl('span', { text: 'Drives', cls: 'gdocs-crumb gdocs-crumb-link' });
     rootSpan.style.cursor = 'pointer';
     rootSpan.style.textDecoration = 'underline';
     rootSpan.addEventListener('click', () => this.resetToRoot());

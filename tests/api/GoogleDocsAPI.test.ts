@@ -96,6 +96,106 @@ describe('GoogleDocsAPI requests', () => {
   });
 });
 
+// ─── Shared Drive support (Drive v3 files.list / files.get params) ───────────
+
+describe('GoogleDocsAPI Shared Drive request params', () => {
+  const requestUrlMock = vi.mocked(requestUrl);
+
+  beforeEach(() => requestUrlMock.mockReset());
+
+  it('listFolderContents includes supportsAllDrives and includeItemsFromAllDrives', async () => {
+    requestUrlMock.mockResolvedValue({ status: 200, json: { files: [] } } as never);
+
+    await makeApi().listFolderContents('folder123');
+
+    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(request.url).toContain('supportsAllDrives=true');
+    expect(request.url).toContain('includeItemsFromAllDrives=true');
+  });
+
+  it('listDocsInFolder includes supportsAllDrives and includeItemsFromAllDrives', async () => {
+    requestUrlMock.mockResolvedValue({ status: 200, json: { files: [] } } as never);
+
+    await makeApi().listDocsInFolder('folder456');
+
+    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(request.url).toContain('supportsAllDrives=true');
+    expect(request.url).toContain('includeItemsFromAllDrives=true');
+  });
+
+  it('listDocsInFolder propagates supportsAllDrives params into recursive subfolder calls', async () => {
+    const rootFiles = {
+      files: [
+        { id: 'sub1', name: 'Sub', mimeType: 'application/vnd.google-apps.folder', modifiedTime: '2024-01-01' },
+      ],
+    };
+    const subFiles = { files: [] };
+    requestUrlMock
+      .mockResolvedValueOnce({ status: 200, json: rootFiles } as never)
+      .mockResolvedValueOnce({ status: 200, json: subFiles } as never);
+
+    await makeApi().listDocsInFolder('folderTop');
+
+    expect(requestUrlMock).toHaveBeenCalledTimes(2);
+    const secondRequest = requestUrlMock.mock.calls[1][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(secondRequest.url).toContain(encodeURIComponent("'sub1' in parents"));
+    expect(secondRequest.url).toContain('supportsAllDrives=true');
+    expect(secondRequest.url).toContain('includeItemsFromAllDrives=true');
+  });
+
+  it('getFolderName includes supportsAllDrives (files.get does not document includeItemsFromAllDrives)', async () => {
+    requestUrlMock.mockResolvedValue({ status: 200, json: { name: 'Shared Folder' } } as never);
+
+    const name = await makeApi().getFolderName('sharedFolder789');
+
+    expect(name).toBe('Shared Folder');
+    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(request.url).toContain('supportsAllDrives=true');
+    expect(request.url).not.toContain('includeItemsFromAllDrives');
+  });
+});
+
+// ─── listSharedDrives ──────────────────────────────────────────────────────────
+
+describe('GoogleDocsAPI.listSharedDrives', () => {
+  const requestUrlMock = vi.mocked(requestUrl);
+
+  beforeEach(() => requestUrlMock.mockReset());
+
+  it('returns the drives array from a successful response', async () => {
+    const drives = [
+      { id: 'drive1', name: 'Marketing Shared Drive' },
+      { id: 'drive2', name: 'Engineering Shared Drive' },
+    ];
+    requestUrlMock.mockResolvedValue({ status: 200, json: { drives } } as never);
+
+    const result = await makeApi().listSharedDrives();
+
+    expect(result).toEqual(drives);
+    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(request.url).toContain('/drives?');
+    expect(request.url).toContain('pageSize=100');
+    expect(request.url).toContain('fields=drives(id,name)');
+    expect(request.url).not.toContain('useDomainAdminAccess');
+  });
+
+  it('returns an empty array when the account belongs to no Shared Drives', async () => {
+    requestUrlMock.mockResolvedValue({ status: 200, json: {} } as never);
+
+    const result = await makeApi().listSharedDrives();
+
+    expect(result).toEqual([]);
+  });
+
+  it('throws a descriptive error on a non-ok response', async () => {
+    requestUrlMock.mockResolvedValue({ status: 403, text: '{"error":{"message":"Insufficient permission."}}' } as never);
+
+    await expect(makeApi().listSharedDrives()).rejects.toThrow(
+      /Google API error 403.*Insufficient permission/,
+    );
+  });
+});
+
 // ─── parseFolderId ────────────────────────────────────────────────────────────
 
 describe('GoogleDocsAPI.parseFolderId', () => {
