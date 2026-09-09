@@ -13,7 +13,8 @@
     "allowSyntheticDefaultImports": true,
     "lib": ["ES6", "DOM"],
     "strict": true,
-    "noImplicitAny": true
+    "noImplicitAny": true,
+    "skipLibCheck": true
   },
   "include": ["src/**/*.ts"]
 }

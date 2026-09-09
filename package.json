@@ -22,5 +22,9 @@
     "tslib": "2.6.2",
     "typescript": "5.5.3",
     "vitest": "^4.1.6"
+  },
+  "dependencies": {
+    "fflate": "^0.8.3",
+    "marked": "^18.0.5"
   }
 }
