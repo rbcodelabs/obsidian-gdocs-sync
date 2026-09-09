@@ -76,6 +76,10 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 3. Click **Connect Google Account** — a browser window opens, you authorize, and Obsidian or Geode reopens automatically
 4. Settings should show your Google email as connected
 
+Token refresh requests for the same connection share one in-flight request. If you disconnect, reconnect, or change **Auth Proxy URL** while a refresh is running, its response cannot replace or clear your current connection. A refresh that takes more than 30 seconds fails with a retry message; its late response is ignored.
+
+The Google Workspace MCP integration requires this connection-guard update in Google Docs Sync before sharing its token refresh capability. Integration consumers can check `TokenStore.supportsConnectionGuard === true`; update the companion plugin if it is absent. Expanded Workspace scopes also require the companion auth proxy update and a fresh Google sign-in.
+
 ### 4. Start syncing
 
 - Add the `gdocs-sync` tag to any note, **or**
