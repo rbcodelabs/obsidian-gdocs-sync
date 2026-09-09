@@ -108,7 +108,7 @@ describe('GoogleDocsAPI Shared Drive request params', () => {
 
     await makeApi().listFolderContents('folder123');
 
-    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    const request = requestUrlMock.mock.calls[1][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
     expect(request.url).toContain('supportsAllDrives=true');
     expect(request.url).toContain('includeItemsFromAllDrives=true');
   });
@@ -118,7 +118,7 @@ describe('GoogleDocsAPI Shared Drive request params', () => {
 
     await makeApi().listDocsInFolder('folder456');
 
-    const request = requestUrlMock.mock.calls[0][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    const request = requestUrlMock.mock.calls[1][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
     expect(request.url).toContain('supportsAllDrives=true');
     expect(request.url).toContain('includeItemsFromAllDrives=true');
   });
@@ -131,13 +131,14 @@ describe('GoogleDocsAPI Shared Drive request params', () => {
     };
     const subFiles = { files: [] };
     requestUrlMock
+      .mockResolvedValueOnce({ status: 200, json: { driveId: 'team-drive' } } as never)
       .mockResolvedValueOnce({ status: 200, json: rootFiles } as never)
       .mockResolvedValueOnce({ status: 200, json: subFiles } as never);
 
     await makeApi().listDocsInFolder('folderTop');
 
-    expect(requestUrlMock).toHaveBeenCalledTimes(2);
-    const secondRequest = requestUrlMock.mock.calls[1][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
+    expect(requestUrlMock).toHaveBeenCalledTimes(3);
+    const secondRequest = requestUrlMock.mock.calls[2][0] as Exclude<Parameters<typeof requestUrl>[0], string>;
     expect(secondRequest.url).toContain(encodeURIComponent("'sub1' in parents"));
     expect(secondRequest.url).toContain('supportsAllDrives=true');
     expect(secondRequest.url).toContain('includeItemsFromAllDrives=true');
