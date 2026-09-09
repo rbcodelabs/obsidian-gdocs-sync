@@ -25,15 +25,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify
+        run: |
+          npx tsc --noEmit
+          npm test
+
       - name: Build
         run: npm run build
 
       - name: Create release and upload assets
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "${{ github.ref_name }}" \
-            --title "${{ github.ref_name }}" \
-            --generate-notes \
+          notes_args=(--generate-notes)
+          if [ -f "docs/releases/${RELEASE_TAG}.md" ]; then
+            notes_args=(--notes-file "docs/releases/${RELEASE_TAG}.md")
+          fi
+          gh release create "$RELEASE_TAG" \
+            --title "$RELEASE_TAG" \
+            "${notes_args[@]}" \
             main.js \
-            manifest.json
+            manifest.json \
+            styles.css
