@@ -24,6 +24,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Folder-based sync** — configure folders that auto-sync all notes inside
 - **Import by URL** — pull an existing Google Doc into Obsidian via the command palette
 - **Drive folder import** — paste a Google Drive folder URL to import all Docs inside it (including subfolders) as notes, with the folder structure mirrored in your vault
+- **Shared Drive support** — browse Google Workspace Shared Drives alongside My Drive, or paste a Shared Drive folder URL to import and sync its accessible Google Docs. Folder traversal uses the Shared Drive's full search scope and follows all result pages, including nested folders.
 - **Automatic new-doc detection** — mapped Drive folders are polled every 5 minutes; new Docs added by anyone are imported automatically
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
@@ -37,7 +38,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 
 1. Clone this repo
 2. Build the plugin (see [Building](#building) below)
-3. Copy `main.js` and `manifest.json` into your vault's plugin folder:
+3. Copy `main.js`, `manifest.json`, and `styles.css` into your vault's plugin folder:
    ```
    <your-vault>/.obsidian/plugins/obsidian-gdocs-sync/
    ```
@@ -82,6 +83,14 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
 
+### Shared Drives
+
+Open the Drive browser to choose **My Drive** or a Shared Drive your connected account belongs to. In folder mode, click a row to select it for sync, or double-click to browse inside. From the keyboard, use Tab to focus a row, Enter to open a folder, and Space to select it. Breadcrumbs return to parent folders or the **Drives** list.
+
+Pasted Shared Drive folder URLs and existing folder mappings also work. Imports and polling follow all pages and subfolders; listing errors are reported instead of returning a partial result. You still need permission to read the content, and editing an existing Google Doc requires edit access. New documents created from unlinked notes continue to be created in My Drive; this does not add a destination picker for document creation. No additional OAuth scopes are required.
+
+If Shared Drive discovery fails, the browser reports the error and keeps My Drive available. Retry by returning to **Drives**. After updating the plugin, fully reload the app if the new picker is missing.
+
 ---
 
 ## Building
@@ -124,6 +133,8 @@ Tests live in `tests/converter/` and cover:
 | `MarkdownToGDocs.test.ts` | Markdown → GDocs batchUpdate requests: all block types, inline styles, list nesting, GFM tables (cell index math, header boldness, inline styles in cells) |
 
 Test payloads are captured from the live API where relevant — no mocks for conversion logic — so format regressions are caught without running Obsidian.
+
+Drive API tests in `tests/api/` use synthetic responses at the `requestUrl` boundary. They cover My Drive and Shared Drive queries, recursive imports, pagination (including empty intermediate pages), and metadata/page failures. `tests/ui/DriveBrowserModal.test.ts` covers selection, keyboard navigation, breadcrumb navigation, fallback, and stale asynchronous responses. These tests do not replace verification with a real Google account.
 
 ### Manual / integration testing
 
