@@ -14,7 +14,7 @@ node tests/live/run-acceptance.mjs \
   --stage primitives
 ```
 
-Click Connect in each numbered test window, then authorize the selected disposable account in its separate browser session. Credentials remain in each isolated profile; they are not copied between clients. The redirect is intercepted before the token-bearing URI reaches browser history or the OS protocol handler. No tracing, HAR, request logging, or auth screenshots are enabled. Each sign-in has a ten-minute timeout. Resume uses credentials only from those same explicitly created profiles.
+Click Connect in each numbered test window, then authorize the selected disposable account in normal system Chrome with a temporary profile. The harness attaches through a loopback debugging port and installs callback capture before navigating to sign-in; no DevTools or callback copying is needed. Credentials remain in each isolated Geode profile; they are not copied between clients. The redirect is intercepted before the token-bearing URI reaches browser history or the OS protocol handler. No tracing, HAR, request logging, or auth screenshots are enabled. Each sign-in has a ten-minute timeout. Resume uses credentials only from those same explicitly created Geode profiles.
 
 Before asking for Connect, the launcher activates the isolated macOS application, shows its Dock entry, restores and focuses the window, and verifies native visible/focused/not-minimized flags within five seconds. Its title is `Geode Disposable QA Client N — TEST VAULT ONLY`. A presentation failure stops before sign-in and advises checking macOS desktop/Spaces. `GEODE_HEADLESS=1` remains set to suppress global protocol registration and single-instance routing; showing this owned window does not change those safeguards.
 
@@ -30,7 +30,7 @@ Manual stage sync waits up to two minutes through the host's exact pre-entry “
 
 Invoke `soak --resume` hourly using the same full flags and paths. The command performs one tick and exits; it does not schedule itself. Passing requires at least 25 ticks over 24 hours, no gap above 90 minutes, verified expected bytes on all clients, and the successful offline/restart hook. Missing ticks or hook failures are not a pass. See `LIVE-ACCEPTANCE.md` and `LIVE-HOOKS.md` for exact evidence semantics.
 
-The CLI never deletes fixture data, credentials, journals, or remote objects automatically. Private `acceptance-launch.json`, `live-acceptance.json`, and `live-hooks.json` remain for resume and later user-directed cleanup. SIGINT/SIGTERM closes only handles launched by this command. Failure messages are deliberately fixed and redact sensitive diagnostics.
+The CLI never deletes Geode fixture data, stored plugin credentials, journals, or remote objects automatically. It closes its own Chrome process and removes that temporary browser profile after sign-in or shutdown. Private `acceptance-launch.json`, `live-acceptance.json`, and `live-hooks.json` remain for resume and later user-directed cleanup. SIGINT/SIGTERM closes only handles launched by this command. Failure messages are deliberately fixed and redact sensitive diagnostics.
 
 Still separate: ordinary Obsidian Docs/Tasks runtime compatibility, credential-refresh/reconnect matrices, full portable-settings conflicts, and actual live results. There is no aggregate beta-ready flag.
 

@@ -2,7 +2,9 @@
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
+import { stat } from 'node:fs/promises';
 import { installOAuthCapture } from './oauth-capture.mjs';
+import { openManualChrome } from './manual-chrome.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? '@playwright/test');
@@ -19,11 +21,15 @@ try {
   });
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  browser = await chromium.launch({ channel: 'chrome', headless: true });
-  const context = await browser.newContext({ serviceWorkers: 'block' });
+  browser = await openManualChrome(chromium);
+  const { context } = browser;
+  assert.equal((await stat(browser.profile)).mode & 0o777, 0o700);
   let delivered = false; const consoleMessages = [];
   await installOAuthCapture(context, { proxyOrigin: origin, expectedState: 'synthetic-state', onCallback: async params => { assert.equal(params.access_token, sentinel); delivered = true; } });
   const page = await context.newPage();
+  const webdriver = await page.evaluate(() => navigator.webdriver);
+  process.stdout.write(`Synthetic browser diagnostic: navigator.webdriver=${webdriver}\n`);
+  assert.equal(webdriver, false, 'Manual sign-in browser must not be automation-launched');
   page.on('console', message => consoleMessages.push(message.text()));
   await page.goto(`${origin}/start`);
   await page.goto(`${origin}/api/auth/callback?code=synthetic-code&state=synthetic-state`);
@@ -34,7 +40,10 @@ try {
   assert.equal(JSON.stringify(history).includes(sentinel), false);
   assert.equal(JSON.stringify(history).includes('callback_uri'), false);
   assert.equal(consoleMessages.some(message => message.includes(sentinel)), false);
-  process.stdout.write('PASS: synthetic callback delivered in memory; token URL absent from browser history/address/console; no success-page request or OS deep link.\n');
+  await browser.close();
+  assert.equal(context.browser().isConnected(), false);
+  await assert.rejects(stat(browser.profile), { code: 'ENOENT' });
+  process.stdout.write('PASS: synthetic callback delivered in memory; token URL absent from browser history/address/console; no success-page request or OS deep link; disposable Chrome closed and profile removed.\n');
 } catch {
   process.stderr.write('FAIL: isolated callback synthetic smoke failed (details redacted).\n'); process.exitCode = 1;
 } finally {

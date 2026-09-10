@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 import { dirname, join, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installOAuthCapture } from './oauth-capture.mjs';
+import { openManualChrome } from './manual-chrome.mjs';
 import { createLiveAcceptance } from './live-acceptance.mjs';
 import { createLiveHooks } from './live-hooks.mjs';
 import { presentWindow } from './present-window.mjs';
@@ -124,8 +125,8 @@ export async function runAcceptance(options) {
         const start = await client.page.evaluate(id => window.app.pluginManager.getPlugin(id).qaAuthUrl, manifest.id);
         const url = new URL(start);
         if (url.protocol !== 'https:' || url.pathname !== '/api/auth/start' || url.searchParams.get('callback_app') !== 'geode' || !url.searchParams.get('state')) throw new Error('Invalid isolated authorization');
-        const browser = await chromium.launch({ channel: 'chrome', headless: false }); browsers.add(browser);
-        const context = await browser.newContext({ serviceWorkers: 'block' });
+        const browser = await openManualChrome(chromium); browsers.add(browser);
+        const { context } = browser;
         let failed = false;
         await installOAuthCapture(context, { proxyOrigin: url.origin, expectedState: url.searchParams.get('state'), onFailure: () => { failed = true; }, onCallback: async params => {
           await client.page.evaluate(async ({ id, params }) => {

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { installOAuthCapture } from './oauth-capture.mjs';
+import { openManualChrome } from './manual-chrome.mjs';
 
 if (!process.argv.includes('--authorize-disposable-account')) throw new Error('Explicit disposable-account authorization is required');
 const core = process.env.GEODE_QA_CORE;
@@ -39,8 +40,8 @@ try {
   const start = await page.evaluate(id => window.app.pluginManager.getPlugin(id).qaAuthUrl, manifest.id);
   const url = new URL(start);
   if (url.protocol !== 'https:' || url.pathname !== '/api/auth/start' || url.searchParams.get('callback_app') !== 'geode' || !url.searchParams.get('state')) throw new Error('Invalid isolated start');
-  browser = await chromium.launch({ channel: 'chrome', headless: false });
-  const context = await browser.newContext({ serviceWorkers: 'block' });
+  browser = await openManualChrome(chromium);
+  const { context } = browser;
   await installOAuthCapture(context, {
     proxyOrigin: url.origin, expectedState: url.searchParams.get('state'),
     onCallback: async params => {
