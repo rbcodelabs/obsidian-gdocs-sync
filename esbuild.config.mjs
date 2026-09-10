@@ -31,6 +31,7 @@ const context = await esbuild.context({
 	logLevel: 'info',
 	sourcemap: prod ? false : 'inline',
 	treeShaking: true,
+	define: { GEODE_MANAGED_SYNC_QA: 'false' },
 	outfile: 'main.js',
 	minify: prod,
 });

@@ -6,35 +6,108 @@ import { GDocsTokens, GDocsPluginSettings } from '../types';
 type PluginWithSettings = Plugin & {
   settings: GDocsPluginSettings;
   saveSettings(): Promise<void>;
+  loadSecret(key: string): Promise<string | null>;
+  saveSecret(key: string, value: string): Promise<void>;
+  removeSecret(key: string): Promise<void>;
 };
+
+const TOKEN_SECRET_KEY = 'google-oauth-tokens';
 
 export class TokenStore {
   readonly supportsConnectionGuard = true;
   private plugin: PluginWithSettings;
-  private pendingRefresh?: {
-    tokens: GDocsTokens;
-    authProxyUrl: string;
-    promise: Promise<string>;
-  };
+  private tokens: GDocsTokens | null = null;
+  private secure = false;
+  private secureRequired = false;
+  private generation = 0;
+  private writes: Promise<unknown> = Promise.resolve();
+  private refreshing?: { generation: number; authProxyUrl: string; promise: Promise<string> };
 
   constructor(plugin: Plugin) {
     this.plugin = plugin as PluginWithSettings;
   }
 
+  async initialize(): Promise<void> {
+    const generation = ++this.generation;
+    return this.serialize(async () => {
+    this.assertGeneration(generation);
+    this.tokens = this.plugin.settings.tokens;
+    this.secure = false;
+    if (typeof this.plugin.loadSecret !== 'function' || typeof this.plugin.saveSecret !== 'function' || typeof this.plugin.removeSecret !== 'function') {
+      this.tokens = this.plugin.settings.tokens;
+      return;
+    }
+    this.secureRequired = true;
+    const encoded = await this.plugin.loadSecret(TOKEN_SECRET_KEY);
+    this.assertGeneration(generation);
+    if (encoded) {
+      try { this.tokens = JSON.parse(encoded) as GDocsTokens; } catch { throw new Error('Stored Google credentials are corrupt. Reconnect your account.'); }
+    }
+    const legacy = this.plugin.settings.tokens;
+    if (legacy) {
+      this.tokens = legacy;
+      try { await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(legacy)); }
+      catch { throw new Error('Secure secret storage is unavailable. Legacy credentials were not removed.'); }
+      this.assertGeneration(generation);
+      this.plugin.settings.tokens = null;
+      try { await this.plugin.saveSettings(); }
+      catch (error) { this.plugin.settings.tokens = legacy; await this.plugin.removeSecret(TOKEN_SECRET_KEY).catch(() => undefined); throw error; }
+    }
+    this.secure = true;
+    this.assertGeneration(generation);
+    });
+  }
+
   get(): GDocsTokens | null {
-    return this.plugin.settings.tokens;
+    return this.tokens;
+  }
+
+  hasSecureStorage(): boolean { return this.secure; }
+  getGeneration(): number { return this.generation; }
+
+  assertGeneration(generation: number): void {
+    if (generation !== this.generation) throw new Error('Google account changed during this operation');
   }
 
   async set(tokens: GDocsTokens): Promise<void> {
-    console.log('[TokenStore] set() called. expiresAt:', new Date(tokens.expiresAt).toISOString());
-    this.plugin.settings.tokens = tokens;
-    await this.plugin.saveSettings();
-    console.log('[TokenStore] saveSettings() complete. tokens in settings:', !!this.plugin.settings.tokens);
+    const generation = ++this.generation;
+    return this.serialize(() => this.persistTokens(tokens, generation));
+  }
+
+  private async persistTokens(tokens: GDocsTokens, generation: number): Promise<void> {
+    this.assertGeneration(generation);
+    if (this.secureRequired) {
+      this.secure = false;
+      await this.plugin.saveSecret(TOKEN_SECRET_KEY, JSON.stringify(tokens));
+      this.assertGeneration(generation);
+      await this.clearLegacy();
+      this.secure = true;
+    }
+    else { this.plugin.settings.tokens = tokens; await this.plugin.saveSettings(); }
+    this.assertGeneration(generation);
+    this.tokens = tokens;
   }
 
   async clear(): Promise<void> {
+    const generation = ++this.generation;
+    return this.serialize(async () => {
+    this.assertGeneration(generation);
+    // A failed migration may leave credentials in both stores. Disconnect only
+    // succeeds when neither persisted copy can restore the account on restart.
+    await this.clearLegacy();
+    this.assertGeneration(generation);
+    if (this.secureRequired) await this.plugin.removeSecret(TOKEN_SECRET_KEY);
+    this.assertGeneration(generation);
+    this.tokens = null;
+    });
+  }
+
+  private async clearLegacy(): Promise<void> {
+    const legacy = this.plugin.settings.tokens;
+    if (!legacy) return;
     this.plugin.settings.tokens = null;
-    await this.plugin.saveSettings();
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.tokens = legacy; throw error; }
   }
 
   isExpired(): boolean {
@@ -44,38 +117,35 @@ export class TokenStore {
     return tokens.expiresAt < Date.now() + 60_000;
   }
 
-  async getValidAccessToken(): Promise<string> {
+  async getValidAccessToken(forceRefresh = false): Promise<string> {
+    await this.writes;
+    const generation = this.generation;
     const tokens = this.get();
     if (!tokens) {
       throw new Error('No tokens stored. Please connect your Google Account first.');
     }
 
-    if (!this.isExpired()) {
+    if (!forceRefresh && !this.isExpired()) {
       return tokens.accessToken;
     }
 
     const authProxyUrl = this.plugin.settings.authProxyUrl;
-    if (this.pendingRefresh?.tokens === tokens && this.pendingRefresh.authProxyUrl === authProxyUrl) {
-      return this.pendingRefresh.promise;
-    }
-
-    const pending = { tokens, authProxyUrl, promise: this.refresh(tokens, authProxyUrl) };
-    this.pendingRefresh = pending;
-    try {
-      return await pending.promise;
-    } finally {
-      // An older connection finishing must not release a newer connection's slot.
-      if (this.pendingRefresh === pending) this.pendingRefresh = undefined;
-    }
+    if (this.refreshing?.generation === generation && this.refreshing.authProxyUrl === authProxyUrl) return this.refreshing.promise;
+    const promise = this.refresh(tokens, generation, authProxyUrl);
+    this.refreshing = { generation, authProxyUrl, promise };
+    try { return await promise; }
+    finally { if (this.refreshing?.promise === promise) this.refreshing = undefined; }
   }
 
-  private assertCurrentConnection(tokens: GDocsTokens, authProxyUrl: string): void {
-    if (this.get() !== tokens || this.plugin.settings.authProxyUrl !== authProxyUrl) {
+  private assertCurrentConnection(generation: number, authProxyUrl: string): void {
+    this.assertGeneration(generation);
+    if (this.plugin.settings.authProxyUrl !== authProxyUrl) {
       throw new Error('Google connection changed during token refresh. Please retry.');
     }
   }
 
-  private async refresh(tokens: GDocsTokens, authProxyUrl: string): Promise<string> {
+  private async refresh(tokens: GDocsTokens, generation: number, authProxyUrl: string): Promise<string> {
+    this.assertCurrentConnection(generation, authProxyUrl);
     // requestUrl has no AbortSignal support. Bound the response wait before any
     // mutation so a late response cannot write tokens after a timed-out attempt.
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -92,7 +162,7 @@ export class TokenStore {
       }),
     ]).finally(() => clearTimeout(timer));
 
-    this.assertCurrentConnection(tokens, authProxyUrl);
+    this.assertCurrentConnection(generation, authProxyUrl);
 
     if (!isSuccessStatus(response.status)) {
       // The proxy forwards Google's machine-readable error code as JSON
@@ -133,8 +203,17 @@ export class TokenStore {
       expiresAt: Date.now() + data.expires_in * 1000,
     };
 
-    await this.set(newTokens);
-    this.assertCurrentConnection(newTokens, authProxyUrl);
+    await this.serialize(async () => {
+      this.assertCurrentConnection(generation, authProxyUrl);
+      await this.persistTokens(newTokens, generation);
+    });
+    this.assertCurrentConnection(generation, authProxyUrl);
     return newTokens.accessToken;
+  }
+
+  private serialize<T>(work: () => Promise<T>): Promise<T> {
+    const operation = this.writes.then(work, work);
+    this.writes = operation.catch(() => undefined);
+    return operation;
   }
 }
