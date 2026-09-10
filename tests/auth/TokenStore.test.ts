@@ -3,7 +3,7 @@ import { requestUrl } from 'obsidian';
 import { TokenStore } from '../../src/auth/TokenStore';
 import type { GDocsPluginSettings, GDocsTokens } from '../../src/types';
 
-function makeStore(error: string | null = null) {
+async function makeStore(error: string | null = null) {
   const plugin = {
     settings: {
       authProxyUrl: 'https://auth.example',
@@ -12,8 +12,18 @@ function makeStore(error: string | null = null) {
     saveSettings: vi.fn().mockResolvedValue(undefined),
   };
   if (error) Object.assign(plugin.settings, { error });
-  return { store: new TokenStore(plugin as never), plugin };
+  const store = new TokenStore(plugin as never);
+  await store.initialize();
+  return { store, plugin };
 }
+
+function deferredResponse() {
+  let resolve!: (value: never) => void;
+  const promise = new Promise<never>(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+const refreshed = { status: 200, json: { access_token: 'refreshed', expires_in: 3600 }, text: '' };
 
 describe('TokenStore refresh', () => {
   const requestUrlMock = vi.mocked(requestUrl);
@@ -21,7 +31,7 @@ describe('TokenStore refresh', () => {
   it('does not restore tokens when an old refresh completes after disconnect', async () => {
     let complete!: (value: never) => void;
     requestUrlMock.mockImplementation(() => new Promise(resolve => { complete = resolve; }) as never);
-    const { store, plugin } = makeStore();
+    const { store, plugin } = await makeStore();
     await store.initialize();
     const refreshing = store.getValidAccessToken();
     await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
@@ -34,7 +44,7 @@ describe('TokenStore refresh', () => {
   it('does not overwrite a reconnected account with an old refresh result', async () => {
     let complete!: (value: never) => void;
     requestUrlMock.mockImplementation(() => new Promise(resolve => { complete = resolve; }) as never);
-    const { store, plugin } = makeStore();
+    const { store, plugin } = await makeStore();
     await store.initialize();
     const refreshing = store.getValidAccessToken();
     await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
@@ -47,9 +57,126 @@ describe('TokenStore refresh', () => {
   });
   it('shares one refresh request across simultaneous API callers', async () => {
     requestUrlMock.mockResolvedValue({ status: 200, json: { access_token: 'new', expires_in: 3600 } } as never);
-    const { store } = makeStore(); await store.initialize();
+    const { store } = await makeStore(); await store.initialize();
     await expect(Promise.all([store.getValidAccessToken(), store.getValidAccessToken()])).resolves.toEqual(['new', 'new']);
     expect(requestUrlMock).toHaveBeenCalledOnce();
+  });
+
+  it('times out a hung refresh and permits retry without accepting the late response', async () => {
+    vi.useFakeTimers();
+    try {
+      const oldResponse = deferredResponse();
+      requestUrlMock.mockReturnValueOnce(oldResponse.promise).mockResolvedValueOnce(refreshed as never);
+      const { store } = await makeStore();
+      const pending = store.getValidAccessToken();
+      const rejection = expect(pending).rejects.toThrow(/timed out/i);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await rejection;
+      await expect(store.getValidAccessToken()).resolves.toBe('refreshed');
+      oldResponse.resolve({ status: 400, json: { error: 'invalid_grant' }, text: '' } as never);
+      await Promise.resolve();
+      expect(store.get()?.accessToken).toBe('refreshed');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('advertises connection-safe refresh support', async () => {
+    expect((await makeStore()).store).toHaveProperty('supportsConnectionGuard', true);
+  });
+
+  it('coalesces concurrent refreshes for the same connection', async () => {
+    const response = deferredResponse();
+    requestUrlMock.mockReturnValue(response.promise);
+    const { store } = await makeStore();
+    const first = store.getValidAccessToken();
+    const second = store.getValidAccessToken();
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledTimes(1));
+    response.resolve(refreshed as never);
+    await expect(Promise.all([first, second])).resolves.toEqual(['refreshed', 'refreshed']);
+  });
+
+  it.each([200, 400])('rejects a stale %s response without changing a reconnected account', async status => {
+    const response = deferredResponse();
+    requestUrlMock.mockReturnValue(response.promise);
+    const { store, plugin } = await makeStore();
+    const pending = store.getValidAccessToken();
+    const rejection = expect(pending).rejects.toThrow(/(?:account|connection) changed/i);
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    const replacement = { accessToken: 'other-account', refreshToken: 'other-refresh', expiresAt: Date.now() + 3600_000 };
+    await store.set(replacement);
+    plugin.saveSettings.mockClear();
+    response.resolve((status === 200 ? refreshed : { status, json: { error: 'invalid_grant' }, text: '' }) as never);
+    await rejection;
+    expect(store.get()).toBe(replacement);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it.each([200, 400])('rejects a %s refresh after the proxy changes', async status => {
+    const response = deferredResponse();
+    requestUrlMock.mockReturnValue(response.promise);
+    const { store, plugin } = await makeStore();
+    const original = store.get();
+    const pending = store.getValidAccessToken();
+    const rejection = expect(pending).rejects.toThrow(/(?:account|connection) changed/i);
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    plugin.settings.authProxyUrl = 'https://other-auth.example';
+    response.resolve((status === 200 ? refreshed : { status, json: { error: 'invalid_grant' }, text: '' }) as never);
+    await rejection;
+    expect(store.get()).toBe(original);
+    expect(plugin.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it('does not return the previous account token if reconnect happens during persistence', async () => {
+    requestUrlMock.mockResolvedValue(refreshed as never);
+    const { store, plugin } = await makeStore();
+    let reconnect!: Promise<void>;
+    plugin.saveSettings.mockImplementationOnce(async () => {
+      reconnect = store.set({ accessToken: 'other-account', refreshToken: 'other-refresh', expiresAt: 3600_000 });
+    });
+    await expect(store.getValidAccessToken()).rejects.toThrow(/(?:account|connection) changed/i);
+    await reconnect;
+    expect(store.get()?.accessToken).toBe('other-account');
+  });
+
+  it('releases the shared refresh after a network error so another attempt can succeed', async () => {
+    requestUrlMock.mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(refreshed as never);
+    const { store } = await makeStore();
+    await expect(store.getValidAccessToken()).rejects.toThrow('offline');
+    await expect(store.getValidAccessToken()).resolves.toBe('refreshed');
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledTimes(2));
+  });
+
+  it('does not join a previous connection refresh after reconnecting', async () => {
+    const oldResponse = deferredResponse();
+    const newResponse = deferredResponse();
+    requestUrlMock.mockReturnValueOnce(oldResponse.promise).mockReturnValueOnce(newResponse.promise);
+    const { store } = await makeStore();
+    const oldPending = store.getValidAccessToken();
+    const oldRejection = expect(oldPending).rejects.toThrow(/(?:account|connection) changed/i);
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    await store.set({ accessToken: 'other', refreshToken: 'other-refresh', expiresAt: 0 });
+    const newPending = store.getValidAccessToken();
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledTimes(2));
+    oldResponse.resolve({ status: 400, json: { error: 'invalid_grant' }, text: '' } as never);
+    await oldRejection;
+    const concurrent = store.getValidAccessToken();
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledTimes(2));
+    newResponse.resolve(refreshed as never);
+    await expect(Promise.all([newPending, concurrent])).resolves.toEqual(['refreshed', 'refreshed']);
+  });
+
+  it('does not restore a disconnected account when refresh completes', async () => {
+    const response = deferredResponse();
+    requestUrlMock.mockReturnValue(response.promise);
+    const { store } = await makeStore();
+    const pending = store.getValidAccessToken();
+    const rejection = expect(pending).rejects.toThrow(/(?:account|connection) changed/i);
+    await vi.waitFor(() => expect(requestUrlMock).toHaveBeenCalledOnce());
+    await store.clear();
+    response.resolve(refreshed as never);
+    await rejection;
+    expect(store.get()).toBeNull();
   });
 
   it('refreshes through requestUrl and stores rotated tokens', async () => {
@@ -58,7 +185,7 @@ describe('TokenStore refresh', () => {
       json: { access_token: 'new', refresh_token: 'rotated', expires_in: 3600 },
       text: '',
     } as never);
-    const { store, plugin } = makeStore();
+    const { store, plugin } = await makeStore();
     await store.initialize();
 
     await expect(store.getValidAccessToken()).resolves.toBe('new');
@@ -73,7 +200,7 @@ describe('TokenStore refresh', () => {
 
   it('clears revoked tokens and preserves the reconnect error', async () => {
     requestUrlMock.mockResolvedValue({ status: 400, json: { error: 'invalid_grant' }, text: '' } as never);
-    const { store, plugin } = makeStore();
+    const { store, plugin } = await makeStore();
     await store.initialize();
 
     await expect(store.getValidAccessToken()).rejects.toThrow(/revoked.*reconnect/i);
@@ -82,7 +209,7 @@ describe('TokenStore refresh', () => {
 
   it('falls back to the HTTP status for a non-JSON refresh failure', async () => {
     requestUrlMock.mockResolvedValue({ status: 502, json: undefined, text: 'bad gateway' } as never);
-    const { store } = makeStore();
+    const { store } = await makeStore();
     await store.initialize();
     await expect(store.getValidAccessToken()).rejects.toThrow('Token refresh failed [http_502]');
   });

@@ -14,13 +14,14 @@ type PluginWithSettings = Plugin & {
 const TOKEN_SECRET_KEY = 'google-oauth-tokens';
 
 export class TokenStore {
+  readonly supportsConnectionGuard = true;
   private plugin: PluginWithSettings;
   private tokens: GDocsTokens | null = null;
   private secure = false;
   private secureRequired = false;
   private generation = 0;
   private writes: Promise<unknown> = Promise.resolve();
-  private refreshing?: { generation: number; promise: Promise<string> };
+  private refreshing?: { generation: number; authProxyUrl: string; promise: Promise<string> };
 
   constructor(plugin: Plugin) {
     this.plugin = plugin as PluginWithSettings;
@@ -128,26 +129,40 @@ export class TokenStore {
       return tokens.accessToken;
     }
 
-    if (this.refreshing?.generation === generation) return this.refreshing.promise;
-    const promise = this.refresh(tokens, generation);
-    this.refreshing = { generation, promise };
+    const authProxyUrl = this.plugin.settings.authProxyUrl;
+    if (this.refreshing?.generation === generation && this.refreshing.authProxyUrl === authProxyUrl) return this.refreshing.promise;
+    const promise = this.refresh(tokens, generation, authProxyUrl);
+    this.refreshing = { generation, authProxyUrl, promise };
     try { return await promise; }
     finally { if (this.refreshing?.promise === promise) this.refreshing = undefined; }
   }
 
-  private async refresh(tokens: GDocsTokens, generation: number): Promise<string> {
+  private assertCurrentConnection(generation: number, authProxyUrl: string): void {
     this.assertGeneration(generation);
+    if (this.plugin.settings.authProxyUrl !== authProxyUrl) {
+      throw new Error('Google connection changed during token refresh. Please retry.');
+    }
+  }
 
-    // Token is expired or about to expire — refresh it via the auth proxy
-    const refreshUrl = `${this.plugin.settings.authProxyUrl}/api/auth/refresh`;
-    const response = await requestUrl({
-      url: refreshUrl,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ refresh_token: tokens.refreshToken }),
-      throw: false,
-    });
-    this.assertGeneration(generation);
+  private async refresh(tokens: GDocsTokens, generation: number, authProxyUrl: string): Promise<string> {
+    this.assertCurrentConnection(generation, authProxyUrl);
+    // requestUrl has no AbortSignal support. Bound the response wait before any
+    // mutation so a late response cannot write tokens after a timed-out attempt.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const response = await Promise.race([
+      requestUrl({
+        url: `${authProxyUrl}/api/auth/refresh`,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: tokens.refreshToken }),
+        throw: false,
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Google token refresh timed out. Please retry.')), 30_000);
+      }),
+    ]).finally(() => clearTimeout(timer));
+
+    this.assertCurrentConnection(generation, authProxyUrl);
 
     if (!isSuccessStatus(response.status)) {
       // The proxy forwards Google's machine-readable error code as JSON
@@ -188,8 +203,11 @@ export class TokenStore {
       expiresAt: Date.now() + data.expires_in * 1000,
     };
 
-    await this.serialize(() => this.persistTokens(newTokens, generation));
-    this.assertGeneration(generation);
+    await this.serialize(async () => {
+      this.assertCurrentConnection(generation, authProxyUrl);
+      await this.persistTokens(newTokens, generation);
+    });
+    this.assertCurrentConnection(generation, authProxyUrl);
     return newTokens.accessToken;
   }
 

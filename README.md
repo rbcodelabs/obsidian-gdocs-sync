@@ -24,6 +24,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Folder-based sync** — configure folders that auto-sync all notes inside
 - **Import by URL** — pull an existing Google Doc into Obsidian via the command palette
 - **Drive folder import** — paste a Google Drive folder URL to import all Docs inside it (including subfolders) as notes, with the folder structure mirrored in your vault
+- **Shared Drive support** — browse Google Workspace Shared Drives alongside My Drive, or paste a Shared Drive folder URL to import and sync its accessible Google Docs. Folder traversal uses the Shared Drive's full search scope and follows all result pages, including nested folders.
 - **Automatic new-doc detection** — mapped Drive folders are polled every 5 minutes; new Docs added by anyone are imported automatically
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
@@ -38,7 +39,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 
 1. Clone this repo
 2. Build the plugin (see [Building](#building) below)
-3. Copy `main.js` and `manifest.json` into your vault's plugin folder:
+3. Copy `main.js`, `manifest.json`, and `styles.css` into your vault's plugin folder:
    ```
    <your-vault>/.obsidian/plugins/obsidian-gdocs-sync/
    ```
@@ -77,6 +78,10 @@ The plugin never holds your `client_secret`. Instead, OAuth token exchange happe
 3. Click **Connect Google Account** — a browser window opens, you authorize, and Obsidian or Geode reopens automatically
 4. Settings should show your Google email as connected
 
+Token refresh requests for the same connection share one in-flight request. If you disconnect, reconnect, or change **Auth Proxy URL** while a refresh is running, its response cannot replace or clear your current connection. A refresh that takes more than 30 seconds fails with a retry message; its late response is ignored.
+
+The Google Workspace MCP integration requires this connection-guard update in Google Docs Sync before sharing its token refresh capability. Integration consumers can check `TokenStore.supportsConnectionGuard === true`; update the companion plugin if it is absent. Expanded Workspace scopes also require the companion auth proxy update and a fresh Google sign-in.
+
 ### 4. Start syncing
 
 - Add the `gdocs-sync` tag to any note, **or**
@@ -104,6 +109,14 @@ OAuth credentials are stored through Geode's native encrypted secret store. Lega
 Disconnect invalidates outstanding sign-in callbacks and orders credential cleanup after earlier authentication settings writes, preventing a delayed callback or save from restoring the disconnected account.
 
 On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode. Test full-vault activation only to confirm the unavailable explanation; there is no supported Drive vault synchronization flow in this delivery.
+
+### Shared Drives
+
+Open the Drive browser to choose **My Drive** or a Shared Drive your connected account belongs to. In folder mode, click a row to select it for sync, or double-click to browse inside. From the keyboard, use Tab to focus a row, Enter to open a folder, and Space to select it. Breadcrumbs return to parent folders or the **Drives** list.
+
+Pasted Shared Drive folder URLs and existing folder mappings also work. Imports and polling follow all pages and subfolders; listing errors are reported instead of returning a partial result. You still need permission to read the content, and editing an existing Google Doc requires edit access. New documents created from unlinked notes continue to be created in My Drive; this does not add a destination picker for document creation. No additional OAuth scopes are required.
+
+If Shared Drive discovery fails, the browser reports the error and keeps My Drive available. Retry by returning to **Drives**. After updating the plugin, fully reload the app if the new picker is missing.
 
 ---
 
@@ -147,6 +160,8 @@ The suite covers OAuth callbacks, token refresh and secure migration, Docs/Tasks
 | `MarkdownToGDocs.test.ts` | Markdown → GDocs batchUpdate requests: all block types, inline styles, list nesting, GFM tables (cell index math, header boldness, inline styles in cells) |
 
 Test payloads are captured from the live API where relevant — no mocks for conversion logic — so format regressions are caught without running Obsidian.
+
+Drive API tests in `tests/api/` use synthetic responses at the `requestUrl` boundary. They cover My Drive and Shared Drive queries, recursive imports, pagination (including empty intermediate pages), and metadata/page failures. `tests/ui/DriveBrowserModal.test.ts` covers selection, keyboard navigation, breadcrumb navigation, fallback, and stale asynchronous responses. These tests do not replace verification with a real Google account.
 
 ### Manual / integration testing
 

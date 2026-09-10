@@ -1,5 +1,5 @@
 import { TokenStore } from '../auth/TokenStore';
-import { DriveItem } from '../types';
+import { DriveItem, SharedDrive } from '../types';
 import { requestUrl } from 'obsidian';
 import { headerRecord, isSuccessStatus, statusText } from './httpStatus';
 
@@ -128,6 +128,13 @@ export class GoogleDocsAPI {
    * Returns the raw HTML string — suitable for feeding into HtmlToMarkdown.
    * Uses the Drive export endpoint which produces richer, more stable HTML
    * than the Docs REST API's JSON representation.
+   *
+   * NOTE: files.export does NOT document a supportsAllDrives parameter
+   * (verified against the current Drive API v3 reference) — unlike files.get
+   * and files.list. No change is needed here for Shared Drive support: export
+   * operates purely on a documentId/fileId the caller already resolved, and
+   * that resolution happens in the (now Shared-Drive-aware) folder/listing
+   * methods below.
    */
   async exportAsHtml(docId: string): Promise<string> {
     const token = await this.tokenStore.getValidAccessToken();
@@ -201,30 +208,78 @@ export class GoogleDocsAPI {
   /**
    * Fetch the name of a Drive folder by its ID.
    * Requires drive.readonly scope.
+   *
+   * supportsAllDrives is required so this also resolves folders (and Shared
+   * Drive roots, whose id behaves like a folder id) that live inside a
+   * corporate Shared Drive rather than My Drive. includeItemsFromAllDrives is
+   * NOT a documented parameter for files.get (only for files.list), so it is
+   * intentionally omitted here — see files.list-based methods below.
    */
   async getFolderName(folderId: string): Promise<string> {
     const data = await this.request<{ name: string }>(
-      `${DRIVE_BASE}/files/${folderId}?fields=name`,
+      `${DRIVE_BASE}/files/${folderId}?fields=name&supportsAllDrives=true`,
     );
     return data.name;
+  }
+
+  /**
+   * List Shared Drives (Team Drives) the connected account is a member of.
+   * Uses default drives.list behavior — no useDomainAdminAccess, since that
+   * flag is for domain-admin tooling, not a normal user's own Shared Drives.
+   * Requires drive.readonly scope.
+   */
+  async listSharedDrives(): Promise<SharedDrive[]> {
+    const drives: SharedDrive[] = [];
+    let pageToken: string | undefined;
+    do {
+      const page = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+      const data = await this.request<{ drives?: SharedDrive[]; nextPageToken?: string }>(
+        `${DRIVE_BASE}/drives?pageSize=100&fields=drives(id,name),nextPageToken${page}`,
+      );
+      drives.push(...(data.drives ?? []));
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+    return drives;
+  }
+
+  private async getFolderDriveId(folderId: string): Promise<string | undefined> {
+    if (folderId === 'root') return undefined;
+    // Resolve from metadata so pasted URLs and saved mappings work just like
+    // picker navigation. Do not cache: folders can move between drives.
+    const data = await this.request<{ driveId?: string }>(
+      `${DRIVE_BASE}/files/${encodeURIComponent(folderId)}?fields=driveId&supportsAllDrives=true`,
+    );
+    return data.driveId;
+  }
+
+  private async listFolderItems(folderId: string, driveId?: string): Promise<DriveItem[]> {
+    const escapedId = folderId.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    const q = encodeURIComponent(
+      `'${escapedId}' in parents and trashed=false and (mimeType='application/vnd.google-apps.folder' or mimeType='application/vnd.google-apps.document')`,
+    );
+    const scope = driveId ? `corpora=drive&driveId=${encodeURIComponent(driveId)}` : 'corpora=user';
+    const url = `${DRIVE_BASE}/files?q=${q}&fields=files(id,name,mimeType,modifiedTime),nextPageToken&orderBy=folder,name&pageSize=200&supportsAllDrives=true&includeItemsFromAllDrives=true&${scope}`;
+    const items: DriveItem[] = [];
+    let pageToken: string | undefined;
+    do {
+      const page = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : '';
+      const data = await this.request<{ files?: DriveItem[]; nextPageToken?: string }>(url + page);
+      items.push(...(data.files ?? []));
+      pageToken = data.nextPageToken;
+    } while (pageToken);
+    return items;
   }
 
   /**
    * List the immediate children (folders and docs) of a Drive folder.
    * Used by the Drive browser modal to support point-and-click folder navigation.
    * Folders are listed before docs, then both sorted alphabetically (orderBy=folder,name).
-   * pageSize=200 matches existing methods; pagination (nextPageToken) is a future enhancement.
+   * Shared Drive folders use their drive corpus to include all accessible
+   * children, including those the user has not previously opened. All pages
+   * are collected before returning, so errors never yield a partial listing.
    */
   async listFolderContents(folderId: string): Promise<DriveItem[]> {
-    const q = encodeURIComponent(
-      `'${folderId}' in parents and trashed=false and (mimeType='application/vnd.google-apps.folder' or mimeType='application/vnd.google-apps.document')`,
-    );
-    const fields = 'files(id,name,mimeType,modifiedTime)';
-    // orderBy=folder,name sorts folders before docs, then alphabetically
-    // pageSize=200 matches existing methods; pagination (nextPageToken) is a future enhancement
-    const url = `${DRIVE_BASE}/files?q=${q}&fields=${fields}&orderBy=folder,name&pageSize=200`;
-    const data = await this.request<{ files: DriveItem[] }>(url);
-    return data.files ?? [];
+    return this.listFolderItems(folderId, await this.getFolderDriveId(folderId));
   }
 
   /**
@@ -232,16 +287,15 @@ export class GoogleDocsAPI {
    * Returns a flat array where each entry includes a relativePath mirroring the
    * Drive subfolder structure, e.g. "Taxes/2024 Return" for a doc two levels deep.
    * Requires drive.metadata.readonly scope.
+   *
+   * Resolve the drive once and preserve it across pages and recursive children.
    */
   async listDocsInFolder(folderId: string, pathPrefix = ''): Promise<DriveFile[]> {
-    const query = encodeURIComponent(
-      `'${folderId}' in parents and trashed=false`,
-    );
-    const fields = 'files(id,name,mimeType,modifiedTime)';
-    const url = `${DRIVE_BASE}/files?q=${query}&fields=${fields}&orderBy=name&pageSize=200`;
+    return this.collectFolderDocs(folderId, pathPrefix, await this.getFolderDriveId(folderId));
+  }
 
-    const data = await this.request<{ files: DriveItem[] }>(url);
-    const items = data.files ?? [];
+  private async collectFolderDocs(folderId: string, pathPrefix: string, driveId?: string): Promise<DriveFile[]> {
+    const items = await this.listFolderItems(folderId, driveId);
 
     const docs: DriveFile[] = [];
 
@@ -256,7 +310,7 @@ export class GoogleDocsAPI {
       } else if (item.mimeType === 'application/vnd.google-apps.folder') {
         // Recurse into subfolders, building up the relative path
         const subPath = pathPrefix ? `${pathPrefix}/${item.name}` : item.name;
-        const subDocs = await this.listDocsInFolder(item.id, subPath);
+        const subDocs = await this.collectFolderDocs(item.id, subPath, driveId);
         docs.push(...subDocs);
       }
     }
