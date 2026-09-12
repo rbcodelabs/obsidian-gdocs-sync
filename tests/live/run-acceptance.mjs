@@ -5,7 +5,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { dirname, join, resolve, isAbsolute, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { installOAuthCapture } from './oauth-capture.mjs';
+import { installOAuthCapture, createAuthCheckpointReporter } from './oauth-capture.mjs';
 import { openManualChrome } from './manual-chrome.mjs';
 import { createLiveAcceptance } from './live-acceptance.mjs';
 import { createLiveHooks } from './live-hooks.mjs';
@@ -77,6 +77,9 @@ export async function runAcceptance(options) {
   const require = createRequire(import.meta.url);
   const { _electron, chromium } = require(join(identity.core, 'node_modules/@playwright/test'));
   const clients = [], pages = [], browsers = new Set();
+  let report = createAuthCheckpointReporter(1), phase = 'CLIENT_PREPARE';
+  const mark = code => { phase = code; report(code, 'START'); };
+  const passed = () => report(phase, 'OK');
   let stopping = false;
   const close = async () => {
     stopping = true;
@@ -87,6 +90,8 @@ export async function runAcceptance(options) {
   process.once('SIGINT', onSignal); process.once('SIGTERM', onSignal);
   try {
     for (let index = 0; index < 3; index++) {
+      report = createAuthCheckpointReporter(index + 1);
+      mark('CLIENT_PREPARE');
       const vault = join(fixture, `vault-${index}`), profile = join(fixture, `profile-${index}`);
       if (!options.resume) { await mkdir(vault, { mode: 0o700 }); await mkdir(profile, { mode: 0o700 }); }
       for (const path of [vault, profile]) await assertInsideFixture(fixture, path);
@@ -106,13 +111,17 @@ export async function runAcceptance(options) {
         await writeFile(join(profile, 'geode.json'), JSON.stringify({ recentVaults: [vault], lastVault: vault }), { mode: 0o600 });
       }
       const launch = async () => {
+        report = createAuthCheckpointReporter(index + 1);
         if (stopping) throw new Error('Stopped');
+        mark('CLIENT_LAUNCH');
         const electronApp = await _electron.launch({ args: [identity.core, `--user-data-dir=${profile}`], cwd: identity.core, env: { ...process.env, GEODE_HEADLESS: '1' } });
         try {
+          passed(); mark('CLIENT_READY');
           const page = await electronApp.firstWindow();
           await page.waitForFunction(id => window.app?.workspace?.layoutReady && window.app.pluginManager?.getPlugin(id)?.qaProvider, manifest.id, { timeout: 30000 });
+          passed();
           return { electronApp, page };
-        } catch { await electronApp.close().catch(() => {}); throw new Error('Isolated client failed to launch'); }
+        } catch { report(phase, 'FAIL'); await electronApp.close().catch(() => {}); throw new Error('Isolated client failed to launch'); }
       };
       const client = { ...await launch(), relaunch: launch }; clients.push(client); pages.push(client.page);
       const connected = await client.page.evaluate(id => Boolean(window.app.pluginManager.getPlugin(id).tokenStore.get()), manifest.id);
@@ -121,27 +130,38 @@ export async function runAcceptance(options) {
         try { await presentWindow(client.electronApp, index + 1); }
         catch { process.stderr.write(`Client ${index + 1}: QA window presentation failed. Check macOS desktop/Spaces; no sign-in started.\n`); throw new Error('QA presentation failed'); }
         process.stdout.write(`Client ${index + 1}: click Connect in the isolated test window and authorize the selected disposable account.\n`);
+        mark('CONNECT_WAIT');
         await client.page.waitForFunction(id => typeof window.app.pluginManager.getPlugin(id).qaAuthUrl === 'string', manifest.id, { timeout: 600000 });
+        passed(); mark('AUTH_START_VALIDATION');
         const start = await client.page.evaluate(id => window.app.pluginManager.getPlugin(id).qaAuthUrl, manifest.id);
         const url = new URL(start);
         if (url.protocol !== 'https:' || url.pathname !== '/api/auth/start' || url.searchParams.get('callback_app') !== 'geode' || !url.searchParams.get('state')) throw new Error('Invalid isolated authorization');
+        passed(); mark('BROWSER_START');
         const browser = await openManualChrome(chromium); browsers.add(browser);
         const { context } = browser;
         const authPage = await context.newPage();
-        const capture = await installOAuthCapture(authPage, { proxyOrigin: url.origin, expectedState: url.searchParams.get('state'), onCallback: async params => {
+        passed(); mark('CAPTURE_INSTALL');
+        const capture = await installOAuthCapture(authPage, { proxyOrigin: url.origin, expectedState: url.searchParams.get('state'), onCheckpoint: report, onCallback: async params => {
           await client.page.evaluate(async ({ id, params }) => {
             const plugin = window.app.pluginManager.getPlugin(id);
             if (!plugin.tokenStore.hasSecureStorage()) throw new Error('Secure storage unavailable');
             await plugin.auth.handleCallback(params);
           }, { id: manifest.id, params });
         } });
+        passed(); mark('AUTH_NAVIGATION');
         await authPage.goto(start).catch(() => { throw new Error('Authorization navigation failed'); });
+        passed(); mark('CAPTURE_WAIT');
         if (!await capture.finished) throw new Error('Isolated authorization rejected');
+        passed(); mark('TOKEN_CHECK');
         if (!await client.page.evaluate(id => Boolean(window.app.pluginManager.getPlugin(id).tokenStore.get()), manifest.id)) throw new Error('Isolated authorization not stored');
+        passed(); mark('BROWSER_CLOSE');
         await browser.close(); browsers.delete(browser);
+        passed();
       }
+      mark('CLIENT_HANDOFF'); passed();
     }
     if (stopping) throw new Error('Stopped');
+    mark('ACCOUNT_PROOF');
     const proofs = [];
     for (const page of pages) proofs.push(await page.evaluate(async id => {
       // QA-only introspection of the actual provider's generation-fenced account lookup.
@@ -155,9 +175,13 @@ export async function runAcceptance(options) {
     const accountReceipt = join(fixture, 'account-proof.json');
     try { if (JSON.parse(await readFile(accountReceipt, 'utf8')).sha256 !== proofs[0]) throw new Error('Fixture account changed'); }
     catch (error) { if (error.code !== 'ENOENT') throw error; await writeFile(accountReceipt, JSON.stringify({ sha256: proofs[0] }), { mode: 0o600, flag: 'wx' }); }
+    passed(); mark('STAGE_EXECUTION');
     const result = await executeStage({ ...options, fixtureDirectory: fixture }, { clients, pages, pluginId: manifest.id });
     process.stdout.write(`Stage ${options.stage}: ${result.status}. Private evidence retained in the explicit fixture.\n`);
     return result;
+  } catch {
+    report(phase, 'FAIL');
+    throw new Error('Acceptance operation failed');
   } finally { process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal); await close(); }
 }
 

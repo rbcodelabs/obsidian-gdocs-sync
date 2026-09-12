@@ -24,6 +24,8 @@ The launch receipt pins both repositories' source commit IDs and SHA-256 digests
 
 Exit codes are explicit: `0` passed, `1` failed/invalid launch, `2` pending (including an unfinished soak), and `3` not verified. Neither an unfinished nor unverified gate reports a successful process exit.
 
+Fixed `QA_AUTH` checkpoints identify the numbered client, allowlisted phase and START/OK/FAIL result before owned-process cleanup. Callback validation/exchange, renderer callback handling, completion cleanup, token readback and next-client startup have separate milestones. Renderer handling includes userinfo and connected UI as well as storage; that phase alone does not prove a storage defect. Checkpoints never include raw exception text, URLs, OAuth parameters or account identifiers.
+
 Manual stage sync waits up to two minutes through the host's exact pre-entry “Sync already running or disconnecting” rejection, which can occur during startup restore or background polling. It rechecks fixture identity before retrying. All other errors—including authentication and integrity failures—stop the stage immediately; a long-running restore beyond that bound requires explicit retry after inspection.
 
 `large-file` transfers a 100 MiB binary. `scale` creates 10,000 files. The two authorization flags include permission for the named stage's synthetic remote writes; do not invoke these expensive stages without the account owner's approval. `interrupted-transfer` intentionally kills **only** a validated test Electron child during an observed upload chunk and relaunches the same private profile. The soak hook performs one observed offline-request rejection plus owned-process restart, then reuses that evidence—not continuous offline coverage.

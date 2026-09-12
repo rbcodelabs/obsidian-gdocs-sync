@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
 import { stat } from 'node:fs/promises';
-import { installOAuthCapture } from './oauth-capture.mjs';
+import { installOAuthCapture, createAuthCheckpointReporter } from './oauth-capture.mjs';
 import { openManualChrome } from './manual-chrome.mjs';
 
 const require = createRequire(import.meta.url);
@@ -49,9 +49,11 @@ try {
     let delivered = 0, failures = 0;
     const page = await context.newPage();
     const messages = [];
+    const checkpoints = [];
     page.on('console', message => messages.push(message.text()));
     assert.equal(await page.evaluate(() => navigator.webdriver), false);
     const capture = await installOAuthCapture(page, { proxyOrigin: proxy, expectedState: state, timeoutMs: 10000,
+      onCheckpoint: createAuthCheckpointReporter(1, text => checkpoints.push(text)),
       onCallback: async params => { assert.equal(params.access_token, sentinel); delivered++; },
       onFailure: () => { failures++; },
     });
@@ -59,6 +61,11 @@ try {
     await page.goto(scenario === 'direct' ? `${proxy}/api/auth/callback?code=${code}&state=${encodedState}` : `${provider}/consent`);
     const rejected = !['direct', 'redirect-chain'].includes(scenario);
     assert.equal(await capture.finished, !rejected);
+    const diagnosticOutput = checkpoints.join('');
+    assert.ok(checkpoints.every(line => /^QA_AUTH client=1 phase=[A-Z_]+ result=(START|OK|FAIL)\n$/.test(line)));
+    const failurePhase = { 'unknown-origin': 'CALLBACK_REQUEST', 'request-state': 'CALLBACK_STATE', 'response-state': 'CALLBACK_IDENTITY' }[scenario];
+    assert.ok(diagnosticOutput.includes(`phase=${failurePhase ?? 'CALLBACK_HANDLING'} result=${rejected ? 'FAIL' : 'OK'}`));
+    assert.ok(diagnosticOutput.includes(`phase=CAPTURE_RESULT result=${rejected ? 'FAIL' : 'OK'}`));
     check = `${scenario}:delivery`;
     assert.equal(delivered, rejected ? 0 : 1, `${scenario}: delivery`);
     assert.equal(failures, rejected ? 1 : 0, `${scenario}: failure notification`);
@@ -71,6 +78,7 @@ try {
     for (const value of [sentinel, code, state, encodedState, 'callback_uri']) {
       assert.equal(history.includes(value), false, `${scenario}: history leak`);
       assert.equal(messages.some(message => message.includes(value)), false, `${scenario}: console leak`);
+      assert.equal(diagnosticOutput.includes(value), false, `${scenario}: diagnostic leak`);
     }
     await cdp.detach();
     await page.close();

@@ -14,6 +14,8 @@ The capture helper uses CDP request-stage interception because Playwright `route
 
 Synthetic proof, with a caller-supplied installed Playwright module:
 
+Drivers print only allowlisted `QA_AUTH client=N phase=CODE result=START|OK|FAIL` checkpoints, including failures before owned-process cleanup. `CALLBACK_HANDLING` covers renderer token storage, userinfo and connected UI together; it does not isolate a storage failure. Acceptance separately reports `TOKEN_CHECK` readback and the next client's `CLIENT_LAUNCH`/handoff. No raw errors, URLs, account identifiers or credential values are logged.
+
 ```sh
 PLAYWRIGHT_MODULE=/absolute/path/to/node_modules/@playwright/test node tests/live/oauth-capture-smoke.mjs
 ```
