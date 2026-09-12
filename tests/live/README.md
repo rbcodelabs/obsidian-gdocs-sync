@@ -2,6 +2,8 @@
 
 This is an acceptance harness, not a user beta or production release. Standard `npm run build` compiles the managed-provider gate to false and excludes the provider. Do not install an acceptance build into a personal vault.
 
+Managed object version changes trigger identity/content revalidation; Drive version alone is not content corruption. Existing `corrupt-blob` and record-quarantine evidence remains blocked because legacy evidence does not identify the original cause. Do not clear that state or reuse its remote objects to bypass integrity protection. A manually authorized retest can create a new shared-vault binding in the same isolated authenticated client, preserving the previous root and local evidence; no new sign-in is required solely for this correction.
+
 Build the actual plugin plus gated provider into an explicitly chosen temporary directory:
 
 ```sh

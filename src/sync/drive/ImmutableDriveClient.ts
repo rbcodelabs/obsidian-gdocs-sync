@@ -67,7 +67,11 @@ export class ImmutableDriveClient {
     })();
     signal.throwIfAborted();
     if (reserved.verifiedVersion) {
-      await this.verify(reserved.id, input, signal, reserved.verifiedVersion);
+      // Revalidate content and owned metadata, even if Drive's version advanced.
+      const verifiedVersion = await this.verify(reserved.id, input, signal);
+      this.auth.assertCurrent(); signal.throwIfAborted();
+      if (verifiedVersion !== reserved.verifiedVersion) await this.journal.save(input.operationKey, { ...reserved, verifiedVersion });
+      this.auth.assertCurrent(); signal.throwIfAborted();
       return reserved.id;
     }
     if (input.metadata.mimeType === 'application/vnd.google-apps.folder') {
@@ -138,10 +142,10 @@ export class ImmutableDriveClient {
     throw new Error('Resumable upload did not confirm completion');
   }
 
-  async verify(id: string, expected: Omit<ImmutableCreate, 'operationKey'>, signal: AbortSignal, expectedVersion?: string): Promise<string> {
+  async verify(id: string, expected: Omit<ImmutableCreate, 'operationKey'>, signal: AbortSignal): Promise<string> {
     const response = await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?fields=id,name,mimeType,parents,appProperties,size,trashed,version` }, signal);
     const actual = response.json;
-    if (!actual || typeof actual.version !== 'string' || (expectedVersion && actual.version !== expectedVersion) || actual.id !== id || actual.trashed || actual.name !== expected.metadata.name || actual.mimeType !== expected.metadata.mimeType ||
+    if (!actual || typeof actual.version !== 'string' || actual.id !== id || actual.trashed || actual.name !== expected.metadata.name || actual.mimeType !== expected.metadata.mimeType ||
       (expected.metadata.parents && canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents)) ||
       canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties) || (expected.metadata.mimeType !== 'application/vnd.google-apps.folder' && Number(actual.size) !== expected.data.byteLength)) {
       throw new Error('Immutable object integrity failure: metadata mismatch');

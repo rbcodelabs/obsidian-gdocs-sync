@@ -76,6 +76,70 @@ async function preparedFolders() {
 }
 
 describe('append-only Google Drive vaults', () => {
+  it('publishes and rescans all four default portable categories across version-only server changes', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'Synthetic config vault', operationId: uuid(1) }, abort());
+    const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const preview = await session.scan(undefined, abort());
+    const defaults = {
+      'appearance.json': { theme: 'dark', baseFontSize: 16, cssTheme: '' },
+      'hotkeys.json': { version: 1, overrides: {} },
+      'editor.json': { readableLineLength: true, foldHeading: false, showLineNumber: false, showRibbon: true, showStatusBar: true },
+      'daily-notes.json': { enabled: true, folder: '', format: 'YYYY-MM-DD', template: '' },
+    };
+    const refs = []; let id = 10;
+    for (const [name, value] of Object.entries(defaults)) {
+      const data = new TextEncoder().encode(canonicalJson(value)).buffer;
+      const operationId = uuid(id++);
+      const blob = await session.putBlob({ operationId, sha256: digest(data), size: data.byteLength, data }, abort()); refs.push(blob);
+      await session.appendRecord({ schema: 1, vaultId: binding.vaultId, recordId: uuid(id++), operationId, deviceId: uuid(2), entityId: uuid(id++), namespace: 'portable-config', parents: [], kind: 'file', deleted: false, location: { parentId: null, name }, blob }, abort());
+    }
+    for (const stored of remote.files.values()) if (['blob', 'record'].includes(stored.meta.appProperties.geodeObjectKind)) stored.meta.version = '2';
+    const synced = await session.scan(preview.cursor, abort());
+    expect(synced.records).toHaveLength(4);
+    expect(synced.blobAvailability).toEqual(expect.arrayContaining(refs.map(ref => ({ id: ref.id, status: 'available' }))));
+    expect(synced.blobAvailability?.some(ref => ref.status === 'corrupt')).toBe(false);
+  });
+  it.each(['read', 'scan', 'stale-metadata-scan', 'blob-replay', 'record-replay', 'record-scan'])('revalidates unchanged bytes after a Drive version-only change during %s', async mode => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const data = new TextEncoder().encode('synthetic').buffer;
+    const input = { operationId: uuid(3), sha256: digest(data), size: data.byteLength, data };
+    const blob = await session.putBlob(input, abort());
+    const record: HistoryRecord = { schema: 1, vaultId: binding.vaultId, recordId: uuid(4), operationId: uuid(3), deviceId: uuid(2), entityId: uuid(5), namespace: 'portable-config', parents: [], kind: 'file', deleted: false, location: { parentId: null, name: 'appearance.json' }, blob };
+    await session.appendRecord(record, abort());
+    const initial = await session.scan(undefined, abort());
+    const changed = mode.startsWith('record-') ? [...remote.files.values()].find(value => value.meta.appProperties?.geodeObjectKind === 'record')! : remote.files.get(blob.id)!;
+    changed.meta.version = '2';
+    remote.changes.push({ sequence: 100, fileId: changed.meta.id, file: changed.meta });
+    if (mode === 'stale-metadata-scan') vi.mocked(requestUrl).mockImplementation(async arg => {
+      const response = await remote.handler(arg as RequestUrlParam);
+      const url = new URL((arg as RequestUrlParam).url);
+      return url.pathname.endsWith('/' + blob.id) && url.searchParams.has('fields') ? { ...response, json: { ...changed.meta, version: '1' } } as never : response;
+    });
+    remote.handler.mockClear();
+    if (mode === 'read') expect(await session.readBlob(blob, abort())).toEqual(data);
+    if (mode === 'scan' || mode === 'stale-metadata-scan') expect((await session.scan(initial.cursor, abort())).blobAvailability).toContainEqual({ id: blob.id, status: 'available' });
+    if (mode === 'blob-replay') expect(await session.putBlob(input, abort())).toEqual(blob);
+    if (mode === 'record-replay') await expect(session.appendRecord(record, abort())).resolves.toBeUndefined();
+    if (mode === 'record-scan') expect((await session.scan(initial.cursor, abort())).records).toEqual([record]);
+    expect(remote.handler.mock.calls.some(([arg]) => typeof arg !== 'string' && arg.url.includes(`/files/${changed.meta.id}?alt=media`))).toBe(true);
+  });
+  it.each(['bytes', 'identity', 'hash-metadata', 'replay-bytes'])('still rejects actual %s changes after a Drive version change', async mode => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const data = new TextEncoder().encode('synthetic').buffer;
+    const input = { operationId: uuid(3), sha256: digest(data), size: data.byteLength, data };
+    const blob = await session.putBlob(input, abort());
+    await session.readBlob(blob, abort());
+    const changed = remote.files.get(blob.id)!; changed.meta.version = '2';
+    if (mode.includes('bytes')) changed.bytes = new TextEncoder().encode('different').buffer;
+    if (mode === 'identity') changed.meta.parents = ['other-root'];
+    if (mode === 'hash-metadata') changed.meta.appProperties.geodeSha256 = '0'.repeat(64);
+    await expect(mode === 'replay-bytes' ? session.putBlob(input, abort()) : session.readBlob(blob, abort())).rejects.toThrow(/integrity/i);
+  });
   const fixtureDirectories: string[] = [];
   afterEach(async () => { await Promise.all(fixtureDirectories.splice(0).map(path => rm(path, { recursive: true, force: true }))); });
   beforeEach(() => { vi.mocked(requestUrl).mockReset(); vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Renderer fetch forbidden'); })); });
@@ -139,7 +203,7 @@ describe('append-only Google Drive vaults', () => {
     const changed = remote.files.get(blob.id)!; changed.meta.version = '2';
     remote.changes.push({ sequence: 100, fileId: blob.id, file: changed.meta });
     const next = await reader.scan(initial.cursor, abort());
-    expect(next.blobAvailability).toContainEqual({ id: blob.id, status: 'corrupt' });
+    expect(next.blobAvailability).toContainEqual({ id: blob.id, status: 'available' });
   });
   it('reports an incomplete setup root without hiding unrelated valid vaults', async () => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
@@ -234,7 +298,7 @@ describe('append-only Google Drive vaults', () => {
     remote.changes.push({ sequence: 99, fileId: entry.meta.id, file: entry.meta });
     expect((await session.scan(first.cursor, abort())).records).toEqual([expect.objectContaining({ recordId: uuid(4), malformedJson: expect.any(String) })]);
   });
-  it('rejects changed known history without accepting a replacement value', async () => {
+  it.each(['bytes', 'identity'])('rejects changed known history %s without accepting a replacement value', async change => {
     const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
     const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
     const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
@@ -243,6 +307,8 @@ describe('append-only Google Drive vaults', () => {
     await session.scan(undefined, abort());
     const stored = [...remote.files.values()].find(value => value.meta.appProperties?.geodeObjectKind === 'record')!;
     stored.meta.version = '2';
+    if (change === 'bytes') stored.bytes = new TextEncoder().encode(canonicalJson({ ...record, location: { parentId: null, name: 'tampered' } })).buffer;
+    else stored.meta.appProperties.geodeRecordId = uuid(99);
     expect((await session.scan(undefined, abort())).records).toEqual([expect.objectContaining({ recordId: uuid(4), malformedJson: expect.any(String) })]);
   });
   it('rejects incomplete Drive listings instead of returning a complete cursor', async () => {

@@ -57,6 +57,7 @@ export class DriveHistorySession implements AppendOnlySession {
     const knownRefs = new Map<string, BlobRef>();
     for (const object of Object.values(observations.objects)) if (object.blob) knownRefs.set(object.blob.id, object.blob);
     const availability = new Map<string, 'available' | 'pending' | 'corrupt'>();
+    const changedBlobs = new Set<string>();
     const addReference = (ref: BlobRef) => {
       const previous = knownRefs.get(ref.id);
       if (previous && (previous.sha256 !== ref.sha256 || previous.size !== ref.size)) availability.set(ref.id, 'corrupt');
@@ -98,9 +99,13 @@ export class DriveHistorySession implements AppendOnlySession {
           else if (known) { availability.set(change.fileId, 'pending'); const ref = knownRefs.get(change.fileId); if (ref) references.set(ref.id, ref); }
           continue;
         }
-        if (known && (change.file?.version !== known.version || !change.file?.parents?.includes(this.binding.rootId) || change.file?.appProperties?.geodeObjectKind !== known.kind || change.file?.appProperties?.geodeVaultId !== this.binding.vaultId || change.file?.appProperties?.geodeSyncProtocol !== PROTOCOL || change.file?.appProperties?.geodeSyncSchema !== '1')) {
+        if (known && (!change.file?.parents?.includes(this.binding.rootId) || change.file?.appProperties?.geodeObjectKind !== known.kind || change.file?.appProperties?.geodeVaultId !== this.binding.vaultId || change.file?.appProperties?.geodeSyncProtocol !== PROTOCOL || change.file?.appProperties?.geodeSyncSchema !== '1')) {
           if (known.kind === 'record') { push(integrityEvidence(known.recordId, 'Known immutable record changed or moved')); continue; }
           availability.set(change.fileId, 'corrupt'); continue;
+        }
+        if (known?.kind === 'blob' && change.file?.version !== known.version) {
+          changedBlobs.add(change.fileId);
+          const ref = knownRefs.get(change.fileId); if (ref) references.set(ref.id, ref);
         }
         if (change.file?.parents?.includes(this.binding.rootId) && change.file?.appProperties?.geodeObjectKind === 'record') {
           push(await read(change.file));
@@ -111,7 +116,7 @@ export class DriveHistorySession implements AppendOnlySession {
       const pending: Record<string, BlobRef> = {};
       for (const ref of references.values()) {
         this.check(signal);
-        const state = availability.get(ref.id) === 'corrupt' ? 'corrupt' : await this.blobAvailability(ref, signal);
+        const state = availability.get(ref.id) === 'corrupt' ? 'corrupt' : await this.blobAvailability(ref, signal, changedBlobs.has(ref.id));
         availability.set(ref.id, state); if (state === 'pending') pending[ref.id] = ref;
       }
       this.check(signal);
@@ -119,7 +124,7 @@ export class DriveHistorySession implements AppendOnlySession {
         const latest = await this.loadObservations();
         for (const [id, candidate] of Object.entries(observations.objects)) {
           const previous = latest.objects[id];
-          if (previous && (previous.version !== candidate.version || previous.hash !== candidate.hash)) throw new Error('Concurrent immutable observation integrity failure');
+          if (previous && previous.hash !== candidate.hash) throw new Error('Concurrent immutable observation integrity failure');
           latest.objects[id] = candidate;
         }
         this.check(signal); await this.config.saveDeviceState(this.observationsKey(), latest); this.check(signal);
@@ -137,7 +142,7 @@ export class DriveHistorySession implements AppendOnlySession {
     const recordId = previous?.recordId ?? meta.appProperties?.geodeRecordId;
     try { this.validateObject(meta, 'record'); }
     catch { return integrityEvidence(recordId, 'Record ownership or metadata is invalid'); }
-    if (previous && previous.version !== meta.version) return integrityEvidence(recordId, 'Known immutable record version changed');
+    if (meta.appProperties?.geodeRecordId !== recordId || meta.name !== `${recordId}.json` || meta.mimeType !== 'application/json') return integrityEvidence(recordId, 'Record identity metadata changed');
     const bytes = (await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(meta.id)}?alt=media` }, this.signal(signal))).arrayBuffer;
     const hash = await sha256Bytes(bytes);
     if (previous && previous.hash !== hash) return integrityEvidence(recordId, 'Known immutable record bytes changed');
@@ -155,14 +160,17 @@ export class DriveHistorySession implements AppendOnlySession {
     if (meta.trashed || !meta.parents?.includes(this.binding.rootId) || meta.appProperties?.geodeVaultId !== this.binding.vaultId || meta.appProperties?.geodeSyncSchema !== '1' || meta.appProperties?.geodeSyncProtocol !== PROTOCOL || meta.appProperties?.geodeObjectKind !== kind || typeof meta.version !== 'string') throw new Error('Managed object identity integrity failure');
   }
 
-  private async blobAvailability(ref: BlobRef, signal: AbortSignal): Promise<'available' | 'pending' | 'corrupt'> {
+  private async blobAvailability(ref: BlobRef, signal: AbortSignal, forceRead = false): Promise<'available' | 'pending' | 'corrupt'> {
     const response = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?fields=${FIELDS}` }, this.signal(signal), [404]);
     if (response.status === 404 || response.json?.trashed) return 'pending';
     const meta = response.json as Metadata;
     try { this.validateObject(meta, 'blob'); } catch { return 'corrupt'; }
     if (Number(meta.size) !== ref.size || meta.appProperties?.geodeSha256 !== ref.sha256) return 'corrupt';
     const previous = await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(ref.id)); this.check(signal);
-    if (previous) return previous.version === meta.version && previous.hash === ref.sha256 ? 'available' : 'corrupt';
+    if (previous?.hash !== undefined && previous.hash !== ref.sha256) return 'corrupt';
+    // Drive versions include server metadata changes; a new version requires bytes,
+    // not an assumption that immutable content changed.
+    if (!forceRead && previous?.version === meta.version) return 'available';
     const content = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, this.signal(signal), [404]);
     if (content.status === 404) return 'pending';
     if (content.arrayBuffer.byteLength !== ref.size || await sha256Bytes(content.arrayBuffer) !== ref.sha256) return 'corrupt';
@@ -173,9 +181,9 @@ export class DriveHistorySession implements AppendOnlySession {
   private async observe(meta: Metadata, hash: string, recordId: string | undefined, signal: AbortSignal): Promise<void> {
     await this.serial(async () => {
       const previous = await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(meta.id));
-      if (previous && (previous.version !== meta.version || previous.hash !== hash)) throw new Error('Known immutable object changed: integrity failure');
+      if (previous && previous.hash !== hash) throw new Error('Known immutable object changed: integrity failure');
       this.check(signal);
-      if (!previous) await this.config.saveDeviceState(this.blobObservationKey(meta.id), { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind, size: Number(meta.size) });
+      if (!previous || previous.version !== meta.version) await this.config.saveDeviceState(this.blobObservationKey(meta.id), { version: meta.version, hash, recordId, kind: meta.appProperties?.geodeObjectKind, size: Number(meta.size) });
       this.check(signal);
     });
   }

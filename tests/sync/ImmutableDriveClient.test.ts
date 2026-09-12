@@ -123,14 +123,14 @@ describe('immutable Drive create', () => {
     await expect(restarted.create({ operationKey: 'op', metadata, data: bytes, sha256 }, signal())).rejects.toThrow();
     expect((vi.mocked(requestUrl).mock.calls[0][0] as RequestUrlParam).method ?? 'GET').toBe('GET');
   });
-  it('rejects a version change to a previously verified immutable object', async () => {
+  it('revalidates bytes after a version change to a previously verified immutable object', async () => {
     const f = fixture(); respondCreated();
     await f.client.create({ operationKey: 'op', metadata, data: bytes, sha256 }, signal());
     vi.mocked(requestUrl).mockReset();
     vi.mocked(requestUrl).mockResolvedValueOnce(response(200, { id: 'reserved-id', ...metadata, size: String(bytes.byteLength), version: '2', trashed: false }) as never)
       .mockResolvedValueOnce(response(200, {}, bytes) as never);
-    await expect(f.client.create({ operationKey: 'op', metadata, data: bytes, sha256 }, signal())).rejects.toThrow(/integrity/i);
-    expect(requestUrl).toHaveBeenCalledTimes(1);
+    await expect(f.client.create({ operationKey: 'op', metadata, data: bytes, sha256 }, signal())).resolves.toBe('reserved-id');
+    expect(requestUrl).toHaveBeenCalledTimes(2);
   });
   it('persists a generated ID before sending one multipart metadata-and-byte creation', async () => {
     const f = fixture();
