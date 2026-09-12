@@ -1,6 +1,7 @@
 // Playwright route() skips HTTP redirect hops. Use CDP on this owned sign-in page.
 const phases = new Set(['CLIENT_PREPARE', 'CLIENT_LAUNCH', 'CLIENT_READY', 'CONNECT_WAIT', 'AUTH_START_VALIDATION', 'BROWSER_START', 'CAPTURE_INSTALL', 'AUTH_NAVIGATION', 'CAPTURE_WAIT', 'CALLBACK_REQUEST', 'CALLBACK_STATE', 'PROXY_EXCHANGE', 'PROXY_RESPONSE', 'CALLBACK_IDENTITY', 'CALLBACK_HANDLING', 'CLEAN_REDIRECT', 'COMPLETION_RENDER', 'COMPLETION_LOAD', 'COMPLETION_RELOAD', 'HISTORY_RESET', 'CAPTURE_RESULT', 'TOKEN_CHECK', 'BROWSER_CLOSE', 'CLIENT_HANDOFF', 'AUTH_TIMEOUT', 'AUTH_PAGE_CLOSED', 'ACCOUNT_PROOF', 'STAGE_EXECUTION']);
 const results = new Set(['START', 'OK', 'FAIL']);
+for (const code of ['IGNORED_NON_AUTH', 'REJECT_DUPLICATE', 'REJECT_ORIGIN', 'REJECT_PATH', 'REJECT_METHOD', 'REJECT_USERINFO', 'REJECT_STATE', 'REJECT_PROXY_RESPONSE', 'REJECT_IDENTITY']) phases.add(code);
 
 export function createAuthCheckpointReporter(client, write = text => process.stdout.write(text)) {
   return (phase, result) => {
@@ -56,6 +57,13 @@ export async function installOAuthCapture(page, options) {
   });
   const handle = async ({ requestId, request }) => {
     const url = new URL(request.url);
+    // CDP globs match the full URL, including nested redirect URLs in queries.
+    // Keep malformed auth-path suffixes fail-closed, but leave unrelated paths alone.
+    if (url.href !== completion && !url.pathname.startsWith('/api/auth/callback') && !url.pathname.startsWith('/auth/success')) {
+      await cdp.send('Fetch.continueRequest', { requestId });
+      checkpoint('IGNORED_NON_AUTH', 'OK');
+      return;
+    }
     if (url.href === completion) {
       await step('COMPLETION_RENDER', () => cdp.send('Fetch.fulfillRequest', {
         requestId, responseCode: 200,
@@ -78,25 +86,33 @@ export async function installOAuthCapture(page, options) {
     let response;
     try {
       mark('CALLBACK_REQUEST');
-      if (claimed || url.origin !== origin || url.pathname !== '/api/auth/callback' || request.method !== 'GET' || url.username || url.password) throw new Error('Invalid callback request');
+      const rejection = claimed ? 'REJECT_DUPLICATE'
+        : url.origin !== origin ? 'REJECT_ORIGIN'
+        : url.pathname !== '/api/auth/callback' ? 'REJECT_PATH'
+        : request.method !== 'GET' ? 'REJECT_METHOD'
+        : url.username || url.password ? 'REJECT_USERINFO' : null;
+      if (rejection) { checkpoint(rejection, 'FAIL'); throw new Error('Invalid callback request'); }
       checkpoint('CALLBACK_REQUEST', 'OK');
       claimed = true;
       // Matches the current proxy's encodeOAuthState(state, 'geode') contract.
       mark('CALLBACK_STATE');
       const encodedState = url.searchParams.get('state');
-      const state = JSON.parse(Buffer.from(encodedState ?? '', 'base64url').toString('utf8'));
-      if (url.searchParams.getAll('state').length !== 1 || url.searchParams.getAll('code').length !== 1 || !url.searchParams.get('code') || state.callbackApp !== 'geode' || state.state !== options.expectedState) throw new Error('Invalid callback state');
+      let state;
+      try {
+        state = JSON.parse(Buffer.from(encodedState ?? '', 'base64url').toString('utf8'));
+        if (url.searchParams.getAll('state').length !== 1 || url.searchParams.getAll('code').length !== 1 || !url.searchParams.get('code') || state.callbackApp !== 'geode' || state.state !== options.expectedState) throw new Error('Invalid callback state');
+      } catch { checkpoint('REJECT_STATE', 'FAIL'); throw new Error('Invalid callback state'); }
       checkpoint('CALLBACK_STATE', 'OK');
       response = await step('PROXY_EXCHANGE', () => fetch(url.href, { redirect: 'manual', signal: AbortSignal.any([controller.signal, AbortSignal.timeout(30000)]) }));
       mark('PROXY_RESPONSE');
-      if (![302, 303, 307, 308].includes(response.status)) throw new Error('Invalid callback response');
+      if (![302, 303, 307, 308].includes(response.status)) { checkpoint('REJECT_PROXY_RESPONSE', 'FAIL'); throw new Error('Invalid callback response'); }
       const location = new URL(response.headers.get('location'), origin);
-      if (location.origin !== origin || location.pathname !== '/auth/success') throw new Error('Invalid callback destination');
+      if (location.origin !== origin || location.pathname !== '/auth/success') { checkpoint('REJECT_PROXY_RESPONSE', 'FAIL'); throw new Error('Invalid callback destination'); }
       checkpoint('PROXY_RESPONSE', 'OK');
       mark('CALLBACK_IDENTITY');
       const uri = new URL(location.searchParams.get('callback_uri'));
       const params = Object.fromEntries(uri.searchParams);
-      if (uri.protocol !== 'geode:' || uri.hostname !== 'gdocs-sync' || params.event !== 'auth_complete' || params.state !== options.expectedState || !params.access_token || !params.refresh_token) throw new Error('Invalid callback identity');
+      if (uri.protocol !== 'geode:' || uri.hostname !== 'gdocs-sync' || params.event !== 'auth_complete' || params.state !== options.expectedState || !params.access_token || !params.refresh_token) { checkpoint('REJECT_IDENTITY', 'FAIL'); throw new Error('Invalid callback identity'); }
       checkpoint('CALLBACK_IDENTITY', 'OK');
       await step('CALLBACK_HANDLING', () => options.onCallback(params));
       success = true;

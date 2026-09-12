@@ -35,6 +35,10 @@ try {
   });
   const unexpected = await serve((_request, response) => { forbiddenRequests++; response.end('Must not be requested'); });
   const provider = await serve((request, response) => {
+    if (scenario === 'nested-query' && request.url === '/consent') {
+      response.end(`<!doctype html><title>Synthetic consent</title><button onclick="location.href='/approve?next=${proxy}/api/auth/callback'">Approve synthetic consent</button>`); return;
+    }
+    if (request.url === '/favicon.ico') { response.writeHead(204); response.end(); return; }
     const destination = scenario === 'unknown-origin' ? unexpected : proxy;
     const callbackState = scenario === 'request-state' ? 'wrong-state' : encodedState;
     const location = request.url === '/consent' ? '/redirect-hop' : `${destination}/api/auth/callback?code=${code}&state=${callbackState}`;
@@ -43,7 +47,7 @@ try {
   browser = await openManualChrome(chromium);
   const { context } = browser;
   assert.equal((await stat(browser.profile)).mode & 0o777, 0o700);
-  for (scenario of ['redirect-chain', 'direct', 'unknown-origin', 'request-state', 'response-state']) {
+  for (scenario of ['nested-query', 'redirect-chain', 'direct', 'unknown-origin', 'request-state', 'response-state']) {
     check = `${scenario}:setup`;
     exchanges = 0; forbiddenRequests = 0;
     let delivered = 0, failures = 0;
@@ -58,10 +62,13 @@ try {
       onFailure: () => { failures++; },
     });
     check = `${scenario}:navigation`;
-    await page.goto(scenario === 'direct' ? `${proxy}/api/auth/callback?code=${code}&state=${encodedState}` : `${provider}/consent`);
-    const rejected = !['direct', 'redirect-chain'].includes(scenario);
+    const consent = scenario === 'nested-query' ? provider.replace('127.0.0.1', 'localhost') : provider;
+    await page.goto(scenario === 'direct' ? `${proxy}/api/auth/callback?code=${code}&state=${encodedState}` : `${consent}/consent`);
+    if (scenario === 'nested-query') await page.getByRole('button', { name: 'Approve synthetic consent' }).click();
+    const rejected = !['direct', 'redirect-chain', 'nested-query'].includes(scenario);
     assert.equal(await capture.finished, !rejected);
     const diagnosticOutput = checkpoints.join('');
+    if (scenario === 'nested-query') assert.ok(diagnosticOutput.includes('phase=IGNORED_NON_AUTH result=OK'));
     assert.ok(checkpoints.every(line => /^QA_AUTH client=1 phase=[A-Z_]+ result=(START|OK|FAIL)\n$/.test(line)));
     const failurePhase = { 'unknown-origin': 'CALLBACK_REQUEST', 'request-state': 'CALLBACK_STATE', 'response-state': 'CALLBACK_IDENTITY' }[scenario];
     assert.ok(diagnosticOutput.includes(`phase=${failurePhase ?? 'CALLBACK_HANDLING'} result=${rejected ? 'FAIL' : 'OK'}`));

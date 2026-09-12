@@ -29,6 +29,34 @@ afterEach(async () => {
 });
 
 describe('isolated OAuth response capture', () => {
+  it('continues an unrelated pathname when the callback glob matches only its query', async () => {
+    const { cdp, page } = fixture();
+    const onCheckpoint = vi.fn(), onCallback = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+    await installOAuthCapture(page, { proxyOrigin: origin, expectedState: 'expected', onCheckpoint, onCallback });
+    cdp.emit('Fetch.requestPaused', { requestId: 'nested', request: { method: 'GET', url: 'https://provider.example.test/approve?next=https://auth.example.test/api/auth/callback' } });
+    await vi.waitFor(() => expect(cdp.send).toHaveBeenCalledWith('Fetch.continueRequest', { requestId: 'nested' }));
+    expect(onCheckpoint).toHaveBeenCalledWith('IGNORED_NON_AUTH', 'OK');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onCallback).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['https://unexpected.example.test/api/auth/callback', 'GET', 'REJECT_ORIGIN'],
+    [origin + '/auth/success', 'GET', 'REJECT_PATH'],
+    [origin + '/api/auth/callback', 'POST', 'REJECT_METHOD'],
+    [origin + '/api/auth/callback?state=wrong&code=synthetic', 'GET', 'REJECT_STATE'],
+  ])('reports an allowlisted rejection for a real auth-path request', async (url, method, reason) => {
+    const { cdp, page } = fixture();
+    const onCheckpoint = vi.fn();
+    vi.stubGlobal('fetch', vi.fn());
+    await installOAuthCapture(page, { proxyOrigin: origin, expectedState: 'expected', onCheckpoint, onCallback: vi.fn() });
+    cdp.emit('Fetch.requestPaused', { requestId: 'rejected', request: { method, url } });
+    await vi.waitFor(() => expect(onCheckpoint).toHaveBeenCalledWith(reason, 'FAIL'));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(cdp.send).not.toHaveBeenCalledWith('Fetch.continueRequest', expect.anything());
+  });
+
   it('prints only allowlisted phase/result codes and a valid client index', () => {
     const create = (captureApi as Record<string, any>).createAuthCheckpointReporter;
     expect(create).toBeTypeOf('function');
