@@ -127,17 +127,17 @@ export async function runAcceptance(options) {
         if (url.protocol !== 'https:' || url.pathname !== '/api/auth/start' || url.searchParams.get('callback_app') !== 'geode' || !url.searchParams.get('state')) throw new Error('Invalid isolated authorization');
         const browser = await openManualChrome(chromium); browsers.add(browser);
         const { context } = browser;
-        let failed = false;
-        await installOAuthCapture(context, { proxyOrigin: url.origin, expectedState: url.searchParams.get('state'), onFailure: () => { failed = true; }, onCallback: async params => {
+        const authPage = await context.newPage();
+        const capture = await installOAuthCapture(authPage, { proxyOrigin: url.origin, expectedState: url.searchParams.get('state'), onCallback: async params => {
           await client.page.evaluate(async ({ id, params }) => {
             const plugin = window.app.pluginManager.getPlugin(id);
             if (!plugin.tokenStore.hasSecureStorage()) throw new Error('Secure storage unavailable');
             await plugin.auth.handleCallback(params);
           }, { id: manifest.id, params });
         } });
-        const authPage = await context.newPage(); await authPage.goto(start).catch(() => { throw new Error('Authorization navigation failed'); });
-        await client.page.waitForFunction(id => Boolean(window.app.pluginManager.getPlugin(id).tokenStore.get()), manifest.id, { timeout: 600000 });
-        if (failed) throw new Error('Isolated authorization rejected');
+        await authPage.goto(start).catch(() => { throw new Error('Authorization navigation failed'); });
+        if (!await capture.finished) throw new Error('Isolated authorization rejected');
+        if (!await client.page.evaluate(id => Boolean(window.app.pluginManager.getPlugin(id).tokenStore.get()), manifest.id)) throw new Error('Isolated authorization not stored');
         await browser.close(); browsers.delete(browser);
       }
     }

@@ -42,7 +42,8 @@ try {
   if (url.protocol !== 'https:' || url.pathname !== '/api/auth/start' || url.searchParams.get('callback_app') !== 'geode' || !url.searchParams.get('state')) throw new Error('Invalid isolated start');
   browser = await openManualChrome(chromium);
   const { context } = browser;
-  await installOAuthCapture(context, {
+  const authPage = await context.newPage();
+  const capture = await installOAuthCapture(authPage, {
     proxyOrigin: url.origin, expectedState: url.searchParams.get('state'),
     onCallback: async params => {
       await page.evaluate(async ({ id, params }) => {
@@ -55,8 +56,8 @@ try {
     },
     onFailure: message => process.stderr.write(`${message}\n`),
   });
-  const authPage = await context.newPage();
   await authPage.goto(start).catch(() => { throw new Error('Isolated authorization navigation failed'); });
+  if (!await capture.finished) throw new Error('Isolated authorization rejected');
   await app.waitForEvent('close', { timeout: 0 });
 } catch {
   process.stderr.write('Isolated QA session ended or failed safely; sensitive details were redacted.\n'); process.exitCode = 1;

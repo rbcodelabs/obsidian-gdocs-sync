@@ -1,4 +1,4 @@
-// Synthetic-only executable fixture. Uses an explicitly supplied local Playwright installation.
+// Synthetic-only: localhost redirects, inert success pages, no Google or OS navigation.
 import { createRequire } from 'node:module';
 import { createServer } from 'node:http';
 import assert from 'node:assert/strict';
@@ -8,45 +8,81 @@ import { openManualChrome } from './manual-chrome.mjs';
 
 const require = createRequire(import.meta.url);
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE ?? '@playwright/test');
-const sentinel = 'synthetic-callback-sentinel';
-let browser; let server;
-try {
-  let forbiddenRequests = 0;
-  server = createServer((request, response) => {
-    if (request.url.startsWith('/api/auth/callback')) {
-      const uri = `geode://gdocs-sync?event=auth_complete&state=synthetic-state&access_token=${sentinel}&refresh_token=${sentinel}&expires_in=3600`;
-      response.writeHead(307, { location: `/auth/success?callback_uri=${encodeURIComponent(uri)}` }); response.end();
-    } else if (request.url.startsWith('/auth/success')) { forbiddenRequests++; response.end('Must never render'); }
-    else response.end('<!doctype html><title>Synthetic authorization</title>');
-  });
+const sentinel = 'synthetic-token-sentinel';
+const state = 'synthetic-state-sentinel';
+const code = 'synthetic-code-sentinel';
+const encodedState = Buffer.from(JSON.stringify({ state, callbackApp: 'geode' })).toString('base64url');
+const servers = [];
+let browser;
+let check = 'startup';
+async function serve(handler) {
+  const server = createServer(handler); servers.push(server);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
-  const origin = `http://127.0.0.1:${server.address().port}`;
+  return `http://127.0.0.1:${server.address().port}`;
+}
+try {
+  let exchanges = 0, forbiddenRequests = 0;
+  let scenario = 'direct';
+  const proxy = await serve((request, response) => {
+    if (request.url.startsWith('/api/auth/callback')) {
+      exchanges++;
+      const uri = new URL('geode://gdocs-sync');
+      for (const [key, value] of Object.entries({ event: 'auth_complete', state: scenario === 'response-state' ? 'wrong-state' : state, access_token: sentinel, refresh_token: sentinel, expires_in: '3600' })) uri.searchParams.set(key, value);
+      response.writeHead(307, { location: `/auth/success?callback_uri=${encodeURIComponent(uri.toString())}` }); response.end();
+    } else if (request.url.startsWith('/auth/success')) {
+      forbiddenRequests++; response.end('<!doctype html><title>Inert forbidden page</title>No script or OS navigation');
+    } else response.end('<!doctype html><title>Synthetic endpoint</title>');
+  });
+  const unexpected = await serve((_request, response) => { forbiddenRequests++; response.end('Must not be requested'); });
+  const provider = await serve((request, response) => {
+    const destination = scenario === 'unknown-origin' ? unexpected : proxy;
+    const callbackState = scenario === 'request-state' ? 'wrong-state' : encodedState;
+    const location = request.url === '/consent' ? '/redirect-hop' : `${destination}/api/auth/callback?code=${code}&state=${callbackState}`;
+    response.writeHead(request.url === '/consent' ? 303 : 302, { location }); response.end();
+  });
   browser = await openManualChrome(chromium);
   const { context } = browser;
   assert.equal((await stat(browser.profile)).mode & 0o777, 0o700);
-  let delivered = false; const consoleMessages = [];
-  await installOAuthCapture(context, { proxyOrigin: origin, expectedState: 'synthetic-state', onCallback: async params => { assert.equal(params.access_token, sentinel); delivered = true; } });
-  const page = await context.newPage();
-  const webdriver = await page.evaluate(() => navigator.webdriver);
-  process.stdout.write(`Synthetic browser diagnostic: navigator.webdriver=${webdriver}\n`);
-  assert.equal(webdriver, false, 'Manual sign-in browser must not be automation-launched');
-  page.on('console', message => consoleMessages.push(message.text()));
-  await page.goto(`${origin}/start`);
-  await page.goto(`${origin}/api/auth/callback?code=synthetic-code&state=synthetic-state`);
-  const cdp = await context.newCDPSession(page);
-  const history = await cdp.send('Page.getNavigationHistory');
-  assert.equal(delivered, true); assert.equal(forbiddenRequests, 0);
-  assert.equal(page.url(), `${origin}/isolated-qa-auth-complete`);
-  assert.equal(JSON.stringify(history).includes(sentinel), false);
-  assert.equal(JSON.stringify(history).includes('callback_uri'), false);
-  assert.equal(consoleMessages.some(message => message.includes(sentinel)), false);
+  for (scenario of ['redirect-chain', 'direct', 'unknown-origin', 'request-state', 'response-state']) {
+    check = `${scenario}:setup`;
+    exchanges = 0; forbiddenRequests = 0;
+    let delivered = 0, failures = 0;
+    const page = await context.newPage();
+    const messages = [];
+    page.on('console', message => messages.push(message.text()));
+    assert.equal(await page.evaluate(() => navigator.webdriver), false);
+    const capture = await installOAuthCapture(page, { proxyOrigin: proxy, expectedState: state, timeoutMs: 10000,
+      onCallback: async params => { assert.equal(params.access_token, sentinel); delivered++; },
+      onFailure: () => { failures++; },
+    });
+    check = `${scenario}:navigation`;
+    await page.goto(scenario === 'direct' ? `${proxy}/api/auth/callback?code=${code}&state=${encodedState}` : `${provider}/consent`);
+    const rejected = !['direct', 'redirect-chain'].includes(scenario);
+    assert.equal(await capture.finished, !rejected);
+    check = `${scenario}:delivery`;
+    assert.equal(delivered, rejected ? 0 : 1, `${scenario}: delivery`);
+    assert.equal(failures, rejected ? 1 : 0, `${scenario}: failure notification`);
+    assert.equal(exchanges, ['unknown-origin', 'request-state'].includes(scenario) ? 0 : 1, `${scenario}: validated before exchange`);
+    assert.equal(forbiddenRequests, 0, `${scenario}: forbidden destination requested`);
+    assert.equal(page.url(), `${proxy}/isolated-qa-auth-complete`, `${scenario}: clean address`);
+    check = `${scenario}:history-and-console`;
+    const cdp = await context.newCDPSession(page);
+    const history = JSON.stringify(await cdp.send('Page.getNavigationHistory'));
+    for (const value of [sentinel, code, state, encodedState, 'callback_uri']) {
+      assert.equal(history.includes(value), false, `${scenario}: history leak`);
+      assert.equal(messages.some(message => message.includes(value)), false, `${scenario}: console leak`);
+    }
+    await cdp.detach();
+    await page.close();
+    process.stdout.write(`PASS: ${scenario}; callback isolated, clean history, no forbidden request.\n`);
+  }
   await browser.close();
   assert.equal(context.browser().isConnected(), false);
   await assert.rejects(stat(browser.profile), { code: 'ENOENT' });
-  process.stdout.write('PASS: synthetic callback delivered in memory; token URL absent from browser history/address/console; no success-page request or OS deep link; disposable Chrome closed and profile removed.\n');
+  process.stdout.write('PASS: normal Chrome closed and disposable profile removed.\n');
 } catch {
-  process.stderr.write('FAIL: isolated callback synthetic smoke failed (details redacted).\n'); process.exitCode = 1;
+  process.stderr.write(`FAIL: ${check} (details redacted).\n`); process.exitCode = 1;
 } finally {
   await browser?.close();
-  if (server) await new Promise(resolve => server.close(resolve));
+  for (const server of servers) await new Promise(resolve => server.close(resolve));
 }
