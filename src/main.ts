@@ -14,7 +14,9 @@ import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { registerManagedDrive } from './sync/registerManagedDrive';
 
-declare const GEODE_MANAGED_SYNC_QA: boolean;
+/** Shown when the host could support full vault sync but the user has not opted in. */
+export const FULL_VAULT_SYNC_OPT_IN_PENDING =
+  'Off. Full vault sync is an unverified beta — turn it on above to register the Google Drive vault transport with Geode.';
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -31,7 +33,19 @@ export default class GDocsPlugin extends Plugin {
   settingsTab!: GDocsSettingTab;
   /** Per-file error messages populated on push/pull failure, read by FileCommandBar */
   perFileErrors: Map<string, string> = new Map();
-  fullVaultSyncUnavailable = 'Google Drive managed vault sync is disabled pending live multi-client acceptance testing. The immutable history protocol is not yet available for personal vaults.';
+  /**
+   * Why full vault sync is not currently active, or '' once the transport is
+   * registered. Read directly by the settings tab, where '' means "registered".
+   */
+  fullVaultSyncUnavailable = FULL_VAULT_SYNC_OPT_IN_PENDING;
+  /**
+   * Hard block: this host/platform cannot support the transport at all, so the
+   * opt-in toggle must stay disabled. Distinct from the opt-in state, and always
+   * wins over it.
+   */
+  fullVaultSyncBlocked = '';
+  /** Guards registerFullVaultSync() — Geode has no in-process unregister. */
+  fullVaultSyncRegistered = false;
   fullVaultSyncWarnings: string[] = [];
 
   async onload(): Promise<void> {
@@ -41,20 +55,12 @@ export default class GDocsPlugin extends Plugin {
     this.tokenStore = new TokenStore(this);
     try {
       await this.tokenStore.initialize();
-      if (!this.tokenStore.hasSecureStorage()) this.fullVaultSyncUnavailable = 'Secure secret storage is unavailable. Full-vault sync requires Geode; Google Docs and Tasks remain available.';
+      if (!this.tokenStore.hasSecureStorage()) this.fullVaultSyncBlocked = 'Secure secret storage is unavailable. Full-vault sync requires Geode; Google Docs and Tasks remain available.';
     } catch (error) {
-      this.fullVaultSyncUnavailable = (error as Error).message;
+      this.fullVaultSyncBlocked = (error as Error).message;
       console.warn('[GDocsPlugin] Full-vault sync unavailable:', error);
     }
-    if (GEODE_MANAGED_SYNC_QA) {
-      try {
-        registerManagedDrive(this, this.tokenStore, () => this.settings, parseYaml, message => {
-          if (!this.fullVaultSyncWarnings.includes(message)) this.fullVaultSyncWarnings.push(message);
-          this.settingsTab?.display();
-        });
-        this.fullVaultSyncUnavailable = 'Disposable QA build only. Use Geode Settings → Sync to explicitly create or join a managed vault, preview changes, then sync. Maximum 100 MiB per file; Google Docs/Tasks-managed paths are excluded.';
-      } catch (error) { this.fullVaultSyncUnavailable = (error as Error).message; }
-    }
+    this.initFullVaultSync();
     this.auth = new GoogleAuth(this, this.tokenStore);
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.tasksApi = new GoogleTasksAPI(this.tokenStore);
@@ -355,6 +361,47 @@ export default class GDocsPlugin extends Plugin {
     this.tasksSyncEngine?.stop();
     this.fileCommandBar?.destroy();
     console.log('[GDocsPlugin] Unloaded');
+  }
+
+  // ── Full vault sync (beta) ───────────────────────────────────────────────
+
+  /**
+   * Applies the startup gate for the managed Drive transport: a hard host block
+   * always wins, otherwise the transport is registered only if the user has
+   * opted in. Called from onload() once the token store has been initialised.
+   */
+  initFullVaultSync(): void {
+    if (this.fullVaultSyncBlocked) {
+      this.fullVaultSyncUnavailable = this.fullVaultSyncBlocked;
+      return;
+    }
+    if (this.settings.fullVaultSyncEnabled) {
+      this.registerFullVaultSync();
+      return;
+    }
+    this.fullVaultSyncUnavailable = FULL_VAULT_SYNC_OPT_IN_PENDING;
+  }
+
+  /**
+   * Register the managed Google Drive vault transport with Geode. Idempotent —
+   * Geode's registerSyncProvider() returns void and ties teardown to plugin
+   * unload, so registering twice would leave a duplicate provider with no way
+   * to remove it. Returns true when a provider is registered.
+   */
+  registerFullVaultSync(): boolean {
+    if (this.fullVaultSyncRegistered) return true;
+    try {
+      registerManagedDrive(this, this.tokenStore, () => this.settings, parseYaml, message => {
+        if (!this.fullVaultSyncWarnings.includes(message)) this.fullVaultSyncWarnings.push(message);
+        this.settingsTab?.display();
+      });
+      this.fullVaultSyncRegistered = true;
+      this.fullVaultSyncUnavailable = '';
+      return true;
+    } catch (error) {
+      this.fullVaultSyncUnavailable = (error as Error).message;
+      return false;
+    }
   }
 
   /**

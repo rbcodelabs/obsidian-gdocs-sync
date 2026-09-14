@@ -88,27 +88,27 @@ The Google Workspace MCP integration requires this connection-guard update in Go
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
 
-### Google Drive managed-vault history (acceptance gated)
+### Google Drive managed-vault history (opt-in beta)
 
-This branch includes **Google Drive managed-vault history** source and unit tests. It is not an available full-vault sync beta. The transport is excluded from the production plugin bundle while integration and live acceptance continue, and is not registered with Geode. Installing this branch does not create a managed Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
+The **Google Drive managed-vault history** transport now ships in the production plugin bundle, but it stays dormant unless you turn it on. Settings → **Full vault sync (Geode)** → **Full vault sync (beta)** is off by default; enabling it opens a consent dialog covering the limits and the still-unverified areas below, and only registers the transport with Geode after you confirm. Until then, nothing is registered, no managed Drive folder is created, and no vault files are uploaded through this transport. Turning the toggle back off persists the opt-out, but Geode's `registerSyncProvider()` has no in-process unregister, so the provider is removed only after a plugin reload or a Geode restart. The existing Google Docs and Tasks features operate independently either way.
 
 The new protocol stores original-byte blobs and complete immutable history records in a dedicated app-managed Drive folder using the existing narrow `drive.file` OAuth scope. Geode owns causal reconciliation, preview, selective scope, conflicts, and local recovery. Independent devices join the same immutable descriptor; remote vault identity does not depend on local folder paths. Deletions are explicit history records; missing objects are never interpreted as user deletion.
 
-Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider honestly reports `conditionalWrites: false` and implements the distinct `append-only-history-v1` contract instead. Settings continues to explain that full-vault sync is unavailable pending acceptance.
+Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider honestly reports `conditionalWrites: false` and implements the distinct `append-only-history-v1` contract instead. When the toggle is off, or when the host cannot support the transport at all, Settings explains exactly why full-vault sync is not active.
 
 Generated Drive IDs and payload identities are persisted before creation. Small files use multipart creation; large files use resumable uploads with session URLs stored as secrets. A retry verifies existing metadata and bytes before accepting an existing ID. Every blob is hash/size verified before publishing its record. All transport, auth, Docs, and Tasks HTTP paths use host-backed `requestUrl`; no renderer `fetch` transport remains. The current maximum file size is 100 MiB.
 
 Device-local operation journals use independent, fully scoped records to avoid growing-map writes for every upload. Google Docs/Tasks-managed folders, linked notes, and tag-eligible notes are excluded in both directions to prevent two writers. In the disposable QA build, incomplete or invalid discovered roots produce visible settings warnings without hiding unrelated valid vaults; they are never implicitly adopted or repaired. See [the isolated test harness](tests/live/README.md) for the acceptance-only build and OAuth isolation requirements.
 
-These are integrity checks, not cryptographic authentication. Objects are immutable by client convention, not server-enforced retention; there are no signatures or end-to-end encryption. A fresh device cannot authenticate a coordinated rewrite by the Google account owner. Do not edit or prune the managed remote objects. Live two-client acceptance, fresh-client reconstruction, interruption testing, scale testing, and a 24-hour soak remain prerequisites to enabling this beta.
+These are integrity checks, not cryptographic authentication. Objects are immutable by client convention, not server-enforced retention; there are no signatures or end-to-end encryption. A fresh device cannot authenticate a coordinated rewrite by the Google account owner. Do not edit or prune the managed remote objects. Live two-client acceptance, fresh-client reconstruction, interruption testing, scale testing, and a 24-hour soak are all still outstanding. The opt-in consent dialog lists them; try this on a test vault first.
 
 Cursor resets recheck referenced blobs instead of treating a completed listing as proof that content is intact. Missing blobs produce retryable, scoped pending evidence; changed immutable blobs produce corruption evidence. Neither becomes a deletion record. New references are verified even when a receiving device already has matching local bytes.
 
-OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
+OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync is hard-blocked — the opt-in toggle is disabled and the reason is shown — and the legacy value is retained.
 
 Disconnect invalidates outstanding sign-in callbacks and orders credential cleanup after earlier authentication settings writes, preventing a delayed callback or save from restoring the disconnected account.
 
-On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode. Test full-vault activation only to confirm the unavailable explanation; there is no supported Drive vault synchronization flow in this delivery.
+On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings, and the full-vault toggle is hard-blocked — that host provides none of the plugin-owned sync registration, device state, or secret storage the transport requires. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode.
 
 ### Shared Drives
 

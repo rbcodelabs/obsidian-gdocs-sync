@@ -27,6 +27,7 @@ export class Setting {
   addDropdown() { return this; }
 }
 export class PluginSettingTab {}
+export class MarkdownView {}
 export class ButtonComponent {
   setButtonText() { return this; }
   setCta() { return this; }
@@ -39,3 +40,9 @@ export class TextComponent {
   setValue() { return this; }
   onChange() { return this; }
 }
+export class ToggleComponent {
+  setValue() { return this; }
+  setDisabled() { return this; }
+  onChange() { return this; }
+}
+export const parseYaml = vi.fn(() => ({}));

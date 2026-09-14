@@ -253,3 +253,13 @@
   background: var(--interactive-accent-hover, var(--interactive-accent));
   filter: brightness(1.08);
 }
+
+/* Full vault sync consent dialog.
+   The disclosure is longer than the modal's content box at realistic window
+   sizes, which pushed the Cancel/confirm buttons outside the visible modal.
+   Scroll the prose instead, so the title and buttons always stay on screen. */
+.gdocs-full-vault-consent .gdocs-full-vault-consent-body {
+  max-height: 50vh;
+  overflow-y: auto;
+  padding-right: 8px;
+}

@@ -10,6 +10,14 @@ export default class ManagedDriveQAPlugin extends GDocsPlugin {
     if ('protocol' in provider && provider.protocol === 'append-only-history-v1') this.qaProvider = provider;
     super.registerSyncProvider(provider);
   }
+  /**
+   * The acceptance runner must always get a provider registered. Force the
+   * opt-in on before onload() reads it, instead of driving the consent UI.
+   */
+  async loadSettings(): Promise<void> {
+    await super.loadSettings();
+    this.settings.fullVaultSyncEnabled = true;
+  }
   async onload(): Promise<void> {
     await super.onload();
     this.syncEngine.stop(); this.tasksSyncEngine.stop();

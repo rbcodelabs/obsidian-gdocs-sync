@@ -5,6 +5,7 @@ import {
   Setting,
   ButtonComponent,
   TextComponent,
+  ToggleComponent,
   Notice,
 } from 'obsidian';
 import { GDocsPluginSettings, FolderMapping } from './types';
@@ -15,6 +16,7 @@ import { SyncEngine } from './sync/SyncEngine';
 import { TasksSyncEngine } from './sync/TasksSyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
+import { FullVaultSyncConsentModal } from './ui/FullVaultSyncConsentModal';
 import { TokenStore } from './auth/TokenStore';
 
 // Expose the additional fields we need beyond the base Plugin type
@@ -29,7 +31,10 @@ export interface GDocsPluginInterface extends Plugin {
   statusBar: StatusBarItem;
   startTasksSyncIfEnabled(): Promise<void>;
   fullVaultSyncUnavailable: string;
+  /** Non-empty when the host cannot support full vault sync at all. */
+  fullVaultSyncBlocked?: string;
   fullVaultSyncWarnings?: string[];
+  registerFullVaultSync(): boolean;
   tokenStore: TokenStore;
 }
 
@@ -95,9 +100,46 @@ export class GDocsSettingTab extends PluginSettingTab {
       });
 
     containerEl.createEl('h2', { text: 'Full vault sync (Geode)' });
+    const blockedReason = this.pluginInstance.fullVaultSyncBlocked ?? '';
     new Setting(containerEl)
-      .setName('Google Drive vault transport')
-      .setDesc(this.pluginInstance.fullVaultSyncUnavailable || 'Registered with Geode. Connect it from Geode Settings → Sync. Files are stored as original bytes in a dedicated “Geode Vault” Drive folder; native Google Docs note links remain separate.');
+      .setName('Full vault sync (beta)')
+      .setDesc(
+        blockedReason ||
+          this.pluginInstance.fullVaultSyncUnavailable ||
+          'Registered with Geode. Connect it from Geode Settings → Sync. Files are stored as original bytes in a dedicated “Geode Vault” Drive folder; native Google Docs note links remain separate.',
+      )
+      .addToggle((toggle: ToggleComponent) => {
+        toggle.setValue(this.pluginInstance.settings.fullVaultSyncEnabled);
+        if (blockedReason) {
+          toggle.setDisabled(true);
+          return;
+        }
+        // ToggleComponent.setValue() re-enters the change callback, so guard the
+        // programmatic revert below rather than recursing into consent.
+        let reverting = false;
+        toggle.onChange(async (value) => {
+          if (reverting) return;
+          if (value) {
+            // Never enable on the click itself — revert visually and require
+            // explicit consent first.
+            reverting = true;
+            toggle.setValue(false);
+            reverting = false;
+            new FullVaultSyncConsentModal(this.app, async () => {
+              this.pluginInstance.settings.fullVaultSyncEnabled = true;
+              await this.pluginInstance.saveSettings();
+              this.pluginInstance.registerFullVaultSync();
+              this.display();
+            }).open();
+            return;
+          }
+          this.pluginInstance.settings.fullVaultSyncEnabled = false;
+          await this.pluginInstance.saveSettings();
+          // Geode's Plugin.registerSyncProvider() returns void and ties teardown
+          // to plugin unload, so there is no in-process unregister.
+          new Notice('Full vault sync will stay off after the next reload. Reload the plugin or restart Geode to unregister the Drive transport from this session.');
+        });
+      });
     for (const warning of this.pluginInstance.fullVaultSyncWarnings ?? []) new Setting(containerEl).setName('Managed vault discovery needs attention').setDesc(warning);
 
     // ── Section 2: Sync Rules ───────────────────────────────────────────────
