@@ -29,6 +29,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
+- **Geode secure credentials** — migrates existing OAuth tokens into Geode's encrypted secret store; ordinary Obsidian retains its existing settings-backed authentication
 
 ---
 
@@ -87,6 +88,28 @@ The Google Workspace MCP integration requires this connection-guard update in Go
 - Configure a sync folder under **Settings → Sync Folders**
 - **Cmd+P → "Sync current note to Google Docs"** for an immediate manual sync
 
+### Google Drive managed-vault history (acceptance gated)
+
+This branch includes **Google Drive managed-vault history** source and unit tests. It is not an available full-vault sync beta. The transport is excluded from the production plugin bundle while integration and live acceptance continue, and is not registered with Geode. Installing this branch does not create a managed Drive folder or upload vault files through this transport. The existing Google Docs and Tasks features continue to operate independently.
+
+The new protocol stores original-byte blobs and complete immutable history records in a dedicated app-managed Drive folder using the existing narrow `drive.file` OAuth scope. Geode owns causal reconciliation, preview, selective scope, conflicts, and local recovery. Independent devices join the same immutable descriptor; remote vault identity does not depend on local folder paths. Deletions are explicit history records; missing objects are never interpreted as user deletion.
+
+Google Drive API v3 does not document atomic ETag/`If-Match` conditional updates. The provider honestly reports `conditionalWrites: false` and implements the distinct `append-only-history-v1` contract instead. Settings continues to explain that full-vault sync is unavailable pending acceptance.
+
+Generated Drive IDs and payload identities are persisted before creation. Small files use multipart creation; large files use resumable uploads with session URLs stored as secrets. A retry verifies existing metadata and bytes before accepting an existing ID. Every blob is hash/size verified before publishing its record. All transport, auth, Docs, and Tasks HTTP paths use host-backed `requestUrl`; no renderer `fetch` transport remains. The current maximum file size is 100 MiB.
+
+Device-local operation journals use independent, fully scoped records to avoid growing-map writes for every upload. Google Docs/Tasks-managed folders, linked notes, and tag-eligible notes are excluded in both directions to prevent two writers. In the disposable QA build, incomplete or invalid discovered roots produce visible settings warnings without hiding unrelated valid vaults; they are never implicitly adopted or repaired. See [the isolated test harness](tests/live/README.md) for the acceptance-only build and OAuth isolation requirements.
+
+These are integrity checks, not cryptographic authentication. Objects are immutable by client convention, not server-enforced retention; there are no signatures or end-to-end encryption. A fresh device cannot authenticate a coordinated rewrite by the Google account owner. Do not edit or prune the managed remote objects. Live two-client acceptance, fresh-client reconstruction, interruption testing, scale testing, and a 24-hour soak remain prerequisites to enabling this beta.
+
+Cursor resets recheck referenced blobs instead of treating a completed listing as proof that content is intact. Missing blobs produce retryable, scoped pending evidence; changed immutable blobs produce corruption evidence. Neither becomes a deletion record. New references are verified even when a receiving device already has matching local bytes.
+
+OAuth credentials are stored through Geode's native encrypted secret store. Legacy tokens are removed from plugin `data.json` only after the secure write succeeds; if secure storage is unavailable, full-vault sync stays disabled and the legacy value is retained.
+
+Disconnect invalidates outstanding sign-in callbacks and orders credential cleanup after earlier authentication settings writes, preventing a delayed callback or save from restoring the disconnected account.
+
+On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode. Test full-vault activation only to confirm the unavailable explanation; there is no supported Drive vault synchronization flow in this delivery.
+
 ### Shared Drives
 
 Open the Drive browser to choose **My Drive** or a Shared Drive your connected account belongs to. In folder mode, click a row to select it for sync, or double-click to browse inside. From the keyboard, use Tab to focus a row, Enter to open a folder, and Space to select it. Breadcrumbs return to parent folders or the **Drives** list.
@@ -123,13 +146,13 @@ When hosted by Geode, the plugin detects the explicit `window.geode.host` marker
 
 ### Automated tests
 
-The converter layer has full unit test coverage using [Vitest](https://vitest.dev/):
+Run the automated suite using [Vitest](https://vitest.dev/):
 
 ```bash
 npm test
 ```
 
-Tests live in `tests/converter/` and cover:
+The suite covers OAuth callbacks, token refresh and secure migration, Docs/Tasks APIs and sync behavior, and the dormant Drive transport. Converter tests live in `tests/converter/` and cover:
 
 | File | What's tested |
 |---|---|
@@ -141,6 +164,8 @@ Test payloads are captured from the live API where relevant — no mocks for con
 Drive API tests in `tests/api/` use synthetic responses at the `requestUrl` boundary. They cover My Drive and Shared Drive queries, recursive imports, pagination (including empty intermediate pages), and metadata/page failures. `tests/ui/DriveBrowserModal.test.ts` covers selection, keyboard navigation, breadcrumb navigation, fallback, and stale asynchronous responses. These tests do not replace verification with a real Google account.
 
 ### Manual / integration testing
+
+There is currently no automated E2E or screenshot harness in this repository. Unit tests use a mocked Obsidian host; real-host OAuth, encrypted persistence across restarts, and Google Docs/Tasks network round trips require manual beta verification.
 
 To verify the full sync loop end-to-end:
 
@@ -183,6 +208,7 @@ src/
     GDocsPoller.ts          setInterval revision check → SyncEngine
     FolderPoller.ts         Every 5min — checks mapped Drive folders for new docs
     ConflictResolver.ts     Last-write-wins (v1)
+    GoogleDriveSyncProvider.ts  Geode full-vault Drive byte transport (desktop, fail-closed without atomic preconditions)
   ui/
     StatusBar.ts            ⇅ GDocs status bar item
     FileCommandBar.ts       Per-file command bar (sync status + Push/Pull/Open buttons)

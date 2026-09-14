@@ -15,6 +15,7 @@ import { SyncEngine } from './sync/SyncEngine';
 import { TasksSyncEngine } from './sync/TasksSyncEngine';
 import { StatusBarItem } from './ui/StatusBar';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
+import { TokenStore } from './auth/TokenStore';
 
 // Expose the additional fields we need beyond the base Plugin type
 export interface GDocsPluginInterface extends Plugin {
@@ -27,6 +28,9 @@ export interface GDocsPluginInterface extends Plugin {
   tasksSyncEngine: TasksSyncEngine;
   statusBar: StatusBarItem;
   startTasksSyncIfEnabled(): Promise<void>;
+  fullVaultSyncUnavailable: string;
+  fullVaultSyncWarnings?: string[];
+  tokenStore: TokenStore;
 }
 
 export class GDocsSettingTab extends PluginSettingTab {
@@ -44,8 +48,8 @@ export class GDocsSettingTab extends PluginSettingTab {
     // ── Section 1: Google Account ───────────────────────────────────────────
     containerEl.createEl('h2', { text: 'Google Account' });
 
-    const { connectedEmail, tokens } = this.pluginInstance.settings;
-    const isConnected = tokens !== null;
+    const { connectedEmail } = this.pluginInstance.settings;
+    const isConnected = this.pluginInstance.tokenStore.get() !== null;
 
     new Setting(containerEl)
       .setName('Connection status')
@@ -89,6 +93,12 @@ export class GDocsSettingTab extends PluginSettingTab {
             await this.pluginInstance.saveSettings();
           });
       });
+
+    containerEl.createEl('h2', { text: 'Full vault sync (Geode)' });
+    new Setting(containerEl)
+      .setName('Google Drive vault transport')
+      .setDesc(this.pluginInstance.fullVaultSyncUnavailable || 'Registered with Geode. Connect it from Geode Settings → Sync. Files are stored as original bytes in a dedicated “Geode Vault” Drive folder; native Google Docs note links remain separate.');
+    for (const warning of this.pluginInstance.fullVaultSyncWarnings ?? []) new Setting(containerEl).setName('Managed vault discovery needs attention').setDesc(warning);
 
     // ── Section 2: Sync Rules ───────────────────────────────────────────────
     containerEl.createEl('h2', { text: 'Sync Rules' });

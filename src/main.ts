@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile } from 'obsidian';
+import { Plugin, Notice, TFile, parseYaml } from 'obsidian';
 import { GDocsPluginSettings, DEFAULT_SETTINGS } from './types';
 import { TokenStore } from './auth/TokenStore';
 import { GoogleAuth } from './auth/GoogleAuth';
@@ -12,6 +12,9 @@ import { FolderImportModal } from './ui/FolderImportModal';
 import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
+import { registerManagedDrive } from './sync/registerManagedDrive';
+
+declare const GEODE_MANAGED_SYNC_QA: boolean;
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -28,12 +31,30 @@ export default class GDocsPlugin extends Plugin {
   settingsTab!: GDocsSettingTab;
   /** Per-file error messages populated on push/pull failure, read by FileCommandBar */
   perFileErrors: Map<string, string> = new Map();
+  fullVaultSyncUnavailable = 'Google Drive managed vault sync is disabled pending live multi-client acceptance testing. The immutable history protocol is not yet available for personal vaults.';
+  fullVaultSyncWarnings: string[] = [];
 
   async onload(): Promise<void> {
     await this.loadSettings();
 
     // ── Service initialisation ──────────────────────────────────────────────
     this.tokenStore = new TokenStore(this);
+    try {
+      await this.tokenStore.initialize();
+      if (!this.tokenStore.hasSecureStorage()) this.fullVaultSyncUnavailable = 'Secure secret storage is unavailable. Full-vault sync requires Geode; Google Docs and Tasks remain available.';
+    } catch (error) {
+      this.fullVaultSyncUnavailable = (error as Error).message;
+      console.warn('[GDocsPlugin] Full-vault sync unavailable:', error);
+    }
+    if (GEODE_MANAGED_SYNC_QA) {
+      try {
+        registerManagedDrive(this, this.tokenStore, () => this.settings, parseYaml, message => {
+          if (!this.fullVaultSyncWarnings.includes(message)) this.fullVaultSyncWarnings.push(message);
+          this.settingsTab?.display();
+        });
+        this.fullVaultSyncUnavailable = 'Disposable QA build only. Use Geode Settings → Sync to explicitly create or join a managed vault, preview changes, then sync. Maximum 100 MiB per file; Google Docs/Tasks-managed paths are excluded.';
+      } catch (error) { this.fullVaultSyncUnavailable = (error as Error).message; }
+    }
     this.auth = new GoogleAuth(this, this.tokenStore);
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.tasksApi = new GoogleTasksAPI(this.tokenStore);
@@ -61,7 +82,7 @@ export default class GDocsPlugin extends Plugin {
     // Handles obsidian://gdocs-sync in Obsidian and geode://gdocs-sync in Geode.
     console.log('[GDocsPlugin] Registering gdocs-sync protocol handler...');
     this.registerObsidianProtocolHandler('gdocs-sync', async (params) => {
-      console.log('[GDocsPlugin] Protocol handler fired! Raw params:', JSON.stringify(params));
+      console.log('[GDocsPlugin] OAuth protocol handler fired for event:', params['event'] ?? 'unknown');
       await this.auth.handleCallback(params);
     });
     console.log('[GDocsPlugin] Protocol handler registered.');
