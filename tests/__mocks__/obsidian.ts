@@ -39,3 +39,38 @@ export class TextComponent {
   setValue() { return this; }
   onChange() { return this; }
 }
+export interface MockMenuItemRecord {
+  title?: string;
+  icon?: string;
+  onClick?: (evt?: unknown) => unknown;
+}
+export class MenuItem {
+  record: MockMenuItemRecord = {};
+  setTitle(title: string) {
+    this.record.title = title;
+    return this;
+  }
+  setIcon(icon: string | null) {
+    this.record.icon = icon ?? undefined;
+    return this;
+  }
+  onClick(callback: (evt?: unknown) => unknown) {
+    this.record.onClick = callback;
+    return this;
+  }
+}
+export class Menu {
+  /** Flat record of every item added via addItem(), for test inspection. */
+  items: MockMenuItemRecord[] = [];
+  separatorCount = 0;
+  addItem(cb: (item: MenuItem) => unknown) {
+    const item = new MenuItem();
+    cb(item);
+    this.items.push(item.record);
+    return this;
+  }
+  addSeparator() {
+    this.separatorCount++;
+    return this;
+  }
+}
