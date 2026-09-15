@@ -13,6 +13,8 @@ import { DriveBrowserModal } from './ui/DriveBrowserModal';
 import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { registerManagedDrive } from './sync/registerManagedDrive';
+import { registerFileMenuActions } from './ui/FileMenu';
+import { pushNoteToGoogleDocs, pullNoteFromGoogleDocs } from './sync/SyncActions';
 
 /** Shown when the host could support full vault sync but the user has not opted in. */
 export const FULL_VAULT_SYNC_OPT_IN_PENDING =
@@ -78,6 +80,7 @@ export default class GDocsPlugin extends Plugin {
     });
 
     this.fileCommandBar = new FileCommandBar(this);
+    registerFileMenuActions(this);
 
     // Refresh the file command bar whenever a sync completes
     this.syncEngine.addSyncListener((path) => {
@@ -127,24 +130,7 @@ export default class GDocsPlugin extends Plugin {
           return;
         }
 
-        this.statusBar.setSyncing(activeFile.basename);
-        try {
-          await this.syncEngine.syncLocalToRemote(activeFile, true /* force */);
-          this.statusBar.setSynced();
-          this.perFileErrors.delete(activeFile.path);
-          this.fileCommandBar.update(activeFile.path);
-          new Notice(`✓ Synced "${activeFile.basename}" to Google Docs`);
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (msg.includes('revoked')) {
-            this.statusBar.setReauthNeeded();
-          } else {
-            this.statusBar.setError('sync failed');
-          }
-          this.perFileErrors.set(activeFile.path, msg);
-          this.fileCommandBar.update(activeFile.path);
-          new Notice(`⚠ Sync failed: ${msg}`);
-        }
+        await pushNoteToGoogleDocs(this, activeFile);
       },
     });
 
@@ -159,31 +145,7 @@ export default class GDocsPlugin extends Plugin {
           return;
         }
 
-        const meta = this.app.metadataCache.getFileCache(activeFile);
-        const docId: string | undefined = meta?.frontmatter?.['gdocs-id'];
-        if (!docId) {
-          new Notice('This note is not linked to a Google Doc.');
-          return;
-        }
-
-        this.statusBar.setSyncing(activeFile.basename);
-        try {
-          await this.syncEngine.syncRemoteToLocal(docId, true /* forceRemote */);
-          this.statusBar.setSynced();
-          this.perFileErrors.delete(activeFile.path);
-          this.fileCommandBar.update(activeFile.path);
-          new Notice(`✓ Pulled latest "${activeFile.basename}" from Google Docs`);
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (msg.includes('revoked')) {
-            this.statusBar.setReauthNeeded();
-          } else {
-            this.statusBar.setError('pull failed');
-          }
-          this.perFileErrors.set(activeFile.path, msg);
-          this.fileCommandBar.update(activeFile.path);
-          new Notice(`⚠ Pull failed: ${msg}`);
-        }
+        await pullNoteFromGoogleDocs(this, activeFile);
       },
     });
 
