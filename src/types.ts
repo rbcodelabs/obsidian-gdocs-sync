@@ -65,6 +65,10 @@ export interface GDocsPluginSettings {
   tokens: GDocsTokens | null;
   connectedEmail: string;     // Google account email shown in settings
   fullVaultRootFolderId: string;
+  // Opt-in for the managed Google Drive full-vault transport (beta). The
+  // transport ships in every build; it is only registered with Geode when the
+  // user has explicitly turned this on after reading the consent dialog.
+  fullVaultSyncEnabled: boolean;
   // ── Google Tasks sync ──
   enableTasksSync: boolean;      // master toggle for the Tasks sync feature
   tasksFolder: string;           // vault folder for synced task notes, e.g. "Google Tasks"
@@ -82,6 +86,7 @@ export const DEFAULT_SETTINGS: GDocsPluginSettings = {
   tokens: null,
   connectedEmail: '',
   fullVaultRootFolderId: '',
+  fullVaultSyncEnabled: false,
   enableTasksSync: false,
   tasksFolder: 'Google Tasks',
   syncedTaskListIds: [],
