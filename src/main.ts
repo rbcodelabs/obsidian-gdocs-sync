@@ -2,6 +2,7 @@ import { Plugin, Notice, TFile, parseYaml } from 'obsidian';
 import { GDocsPluginSettings, DEFAULT_SETTINGS } from './types';
 import { TokenStore } from './auth/TokenStore';
 import { GoogleAuth } from './auth/GoogleAuth';
+import { GoogleConnectionApi } from './auth/GoogleConnectionApi';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { GoogleTasksAPI } from './api/GoogleTasksAPI';
 import { SyncEngine } from './sync/SyncEngine';
@@ -26,6 +27,7 @@ export default class GDocsPlugin extends Plugin {
   // Core services — assigned in onload() after settings are ready
   tokenStore!: TokenStore;
   auth!: GoogleAuth;
+  connectionApi!: GoogleConnectionApi;
   api!: GoogleDocsAPI;
   tasksApi!: GoogleTasksAPI;
   syncEngine!: SyncEngine;
@@ -64,6 +66,7 @@ export default class GDocsPlugin extends Plugin {
     }
     this.initFullVaultSync();
     this.auth = new GoogleAuth(this, this.tokenStore);
+    this.connectionApi = this.auth;
     this.api = new GoogleDocsAPI(this.tokenStore);
     this.tasksApi = new GoogleTasksAPI(this.tokenStore);
     this.syncEngine = new SyncEngine(this, this.api, this.tokenStore);
@@ -98,16 +101,20 @@ export default class GDocsPlugin extends Plugin {
 
     // After a successful connect: refresh settings UI, start the sync engine,
     // and update the status bar so it stops showing "reconnect required".
-    this.auth.onConnected = () => {
-      this.settingsTab?.display();
-      void this.syncEngine.start().then(() => {
-        this.statusBar.setIdle();
-        void this.startTasksSyncIfEnabled();
-      }).catch((err: Error) => {
-        console.error('[GDocsPlugin] Failed to start sync engine after reconnect:', err);
-        this.statusBar.setError('startup failed');
-      });
-    };
+    this.auth.onConnectionChange((connected) => {
+      if (connected) {
+        this.settingsTab?.display();
+        void this.syncEngine.start().then(() => {
+          this.statusBar.setIdle();
+          void this.startTasksSyncIfEnabled();
+        }).catch((err: Error) => {
+          console.error('[GDocsPlugin] Failed to start sync engine after reconnect:', err);
+          this.statusBar.setError('startup failed');
+        });
+      } else {
+        this.settingsTab?.display();
+      }
+    });
 
     // ── Settings tab ────────────────────────────────────────────────────────
     this.settingsTab = new GDocsSettingTab(this.app, this as unknown as GDocsPluginInterface);

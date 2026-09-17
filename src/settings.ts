@@ -10,6 +10,7 @@ import {
 } from 'obsidian';
 import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
+import { GoogleConnectionApi } from './auth/GoogleConnectionApi';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
 import { GoogleTasksAPI, GoogleTaskList } from './api/GoogleTasksAPI';
 import { SyncEngine } from './sync/SyncEngine';
@@ -24,6 +25,7 @@ export interface GDocsPluginInterface extends Plugin {
   settings: GDocsPluginSettings;
   saveSettings(): Promise<void>;
   auth: GoogleAuth;
+  connectionApi: GoogleConnectionApi;
   api: GoogleDocsAPI;
   tasksApi: GoogleTasksAPI;
   syncEngine: SyncEngine;
@@ -77,7 +79,7 @@ export class GDocsSettingTab extends PluginSettingTab {
             .setButtonText('Connect Google Account')
             .setCta()
             .onClick(async () => {
-              await this.pluginInstance.auth.connect();
+              await this.pluginInstance.auth.requestConnection();
               // The settings panel will reflect the change after the OAuth
               // callback fires and updates connectedEmail.
             });

@@ -49,7 +49,7 @@ export class SyncStatusModal extends Modal {
         cls: 'mod-cta gdocs-reconnect-btn',
       });
       reconnectBtn.addEventListener('click', () => {
-        void this.plugin.auth.connect();
+        void this.plugin.auth.requestConnection({ force: true });
         this.close();
       });
     } else {
@@ -65,7 +65,7 @@ export class SyncStatusModal extends Modal {
           cls: 'mod-cta gdocs-reconnect-btn',
         });
         connectBtn.addEventListener('click', () => {
-          void this.plugin.auth.connect();
+          void this.plugin.auth.requestConnection();
           this.close();
         });
       }

@@ -226,6 +226,28 @@ Plugin → opens browser → obsidian-gdocs-auth.vercel.app/api/auth/start?state
   → Plugin's protocol handler stores tokens
 ```
 
+### For plugin developers
+
+Other Obsidian plugins can trigger or observe this plugin's Google connection
+flow through a stable, documented API — no need to reach into implementation
+detail like `auth.connect()`:
+
+```js
+const gdocs = app.plugins.plugins['obsidian-gdocs-sync'];
+if (gdocs?.connectionApi) {
+  const { email } = await gdocs.connectionApi.requestConnection();
+}
+```
+
+`requestConnection()` resolves immediately (no browser window) if already
+connected, unless called with `{ force: true }`; concurrent callers are
+deduped onto the same in-flight promise. Also available: `isConnected()`,
+`getConnectedEmail()`, `disconnect()`, and `onConnectionChange(callback)` to
+subscribe to connect/disconnect events. Connection changes are also broadcast
+on `app.workspace` as `'gdocs-sync:connected'` / `'gdocs-sync:disconnected'`,
+each firing with a `{ email: string | null }` payload. See
+`src/auth/GoogleConnectionApi.ts` for the full contract.
+
 ### Sync flow
 
 ```
