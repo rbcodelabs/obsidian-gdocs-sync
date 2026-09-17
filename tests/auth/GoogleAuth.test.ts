@@ -21,9 +21,12 @@ function validTokens(): GDocsTokens {
   return { accessToken: 'at', refreshToken: 'rt', expiresAt: Date.now() + 3600_000 };
 }
 
-function makeAuth(settingsOverrides: Partial<GDocsPluginSettings> = {}) {
+async function makeAuth(settingsOverrides: Partial<GDocsPluginSettings> = {}) {
   const { plugin, trigger } = makeFakePlugin(settingsOverrides);
   const tokenStore = new TokenStore(plugin as never);
+  // Mirrors main.ts's onload(): TokenStore caches tokens internally and only
+  // hydrates that cache from plugin.settings.tokens via initialize().
+  await tokenStore.initialize();
   const auth = new GoogleAuth(plugin as never, tokenStore);
   return { plugin, trigger, tokenStore, auth };
 }
@@ -65,17 +68,17 @@ describe('GoogleAuth host callback selection', () => {
     );
   });
 
-  it('allows isolated sign-in navigation while retaining original callback state validation', async () => {
-    const { auth } = makeAuth();
+  it('extracts the OAuth state from the navigated URL and completes the connect flow', async () => {
+    const { auth } = await makeAuth();
 
-    auth.requestConnection();
+    const connectPromise = auth.requestConnection();
     const state = new URL(openExternalMock.mock.calls[0][0]).searchParams.get('state')!;
-
-    await auth.handleCallback({ event: 'auth_complete', state: 'wrong', access_token: 'synthetic', refresh_token: 'synthetic' });
-    expect(auth.isConnected()).toBe(false);
+    expect(state).toBeTruthy();
 
     requestUrlMock.mockResolvedValue({ status: 200, json: {} } as never);
     await auth.handleCallback({ event: 'auth_complete', state, access_token: 'synthetic', refresh_token: 'synthetic' });
+
+    await connectPromise;
     expect(auth.isConnected()).toBe(true);
   });
 });
@@ -83,12 +86,14 @@ describe('GoogleAuth host callback selection', () => {
 // ─── isConnected / getConnectedEmail ────────────────────────────────────────
 
 describe('GoogleAuth.isConnected / getConnectedEmail', () => {
-  it('reflect settings.tokens and settings.connectedEmail', () => {
-    const { plugin, auth } = makeAuth();
+  it('reflect settings.tokens and settings.connectedEmail', async () => {
+    const { plugin, tokenStore, auth } = await makeAuth();
     expect(auth.isConnected()).toBe(false);
     expect(auth.getConnectedEmail()).toBeNull();
 
-    plugin.settings.tokens = validTokens();
+    // TokenStore caches tokens internally once initialized, so go through its
+    // API rather than mutating plugin.settings.tokens directly underneath it.
+    await tokenStore.set(validTokens());
     plugin.settings.connectedEmail = 'user@example.com';
 
     expect(auth.isConnected()).toBe(true);
@@ -100,7 +105,7 @@ describe('GoogleAuth.isConnected / getConnectedEmail', () => {
 
 describe('GoogleAuth.requestConnection — already connected', () => {
   it('resolves immediately with the current email, without opening a browser', async () => {
-    const { auth } = makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
+    const { auth } = await makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
 
     const result = await auth.requestConnection();
 
@@ -108,8 +113,8 @@ describe('GoogleAuth.requestConnection — already connected', () => {
     expect(openExternalMock).not.toHaveBeenCalled();
   });
 
-  it('with force: true still opens the browser instead of short-circuiting', () => {
-    const { auth } = makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
+  it('with force: true still opens the browser instead of short-circuiting', async () => {
+    const { auth } = await makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
 
     const connectPromise = auth.requestConnection({ force: true });
     connectPromise.catch(() => {
@@ -123,8 +128,8 @@ describe('GoogleAuth.requestConnection — already connected', () => {
 // ─── requestConnection — dedup ───────────────────────────────────────────────
 
 describe('GoogleAuth.requestConnection — dedup', () => {
-  it('returns the same in-flight promise for concurrent calls and opens the browser once', () => {
-    const { auth } = makeAuth();
+  it('returns the same in-flight promise for concurrent calls and opens the browser once', async () => {
+    const { auth } = await makeAuth();
 
     const p1 = auth.requestConnection();
     const p2 = auth.requestConnection();
@@ -141,7 +146,7 @@ describe('GoogleAuth.requestConnection — dedup', () => {
 
 describe('GoogleAuth successful connect flow', () => {
   it('resolves requestConnection, marks connected, and broadcasts gdocs-sync:connected', async () => {
-    const { auth, trigger } = makeAuth();
+    const { auth, trigger } = await makeAuth();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('test-state' as any);
@@ -166,7 +171,7 @@ describe('GoogleAuth successful connect flow', () => {
   });
 
   it('notifies onConnectionChange listeners, and stops after unsubscribe', async () => {
-    const { auth } = makeAuth();
+    const { auth } = await makeAuth();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('state-1' as any);
@@ -212,7 +217,7 @@ describe('GoogleAuth successful connect flow', () => {
 
 describe('GoogleAuth connect flow — state mismatch', () => {
   it('rejects the pending promise and leaves the account disconnected', async () => {
-    const { auth } = makeAuth();
+    const { auth } = await makeAuth();
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     vi.spyOn(crypto, 'randomUUID').mockReturnValue('real-state' as any);
@@ -237,7 +242,7 @@ describe('GoogleAuth connect flow — state mismatch', () => {
 
 describe('GoogleAuth.disconnect', () => {
   it('clears connection state and broadcasts gdocs-sync:disconnected', async () => {
-    const { auth, trigger } = makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
+    const { auth, trigger } = await makeAuth({ tokens: validTokens(), connectedEmail: 'user@example.com' });
 
     await auth.disconnect();
 
@@ -251,7 +256,7 @@ describe('GoogleAuth.disconnect', () => {
 
 describe('GoogleAuth.requestConnection — timeout', () => {
   it('rejects after 5 minutes with no callback', async () => {
-    const { auth } = makeAuth();
+    const { auth } = await makeAuth();
 
     const connectPromise = auth.requestConnection();
     const rejection = expect(connectPromise).rejects.toThrow(/timed out/i);
