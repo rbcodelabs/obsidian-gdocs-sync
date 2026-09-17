@@ -23,6 +23,7 @@ export default class ManagedDriveQAPlugin extends GDocsPlugin {
     this.syncEngine.stop(); this.tasksSyncEngine.stop();
     // Never send QA auth to the OS/default browser. A dedicated driver consumes this URL in memory.
     this.auth = new GoogleAuth(this, this.tokenStore, async url => { this.qaAuthUrl = url; });
-    this.auth.onConnected = () => this.settingsTab.display();
+    this.connectionApi = this.auth;
+    this.auth.onConnectionChange(() => this.settingsTab.display());
   }
 }

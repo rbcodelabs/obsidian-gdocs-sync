@@ -2,6 +2,7 @@ import { Plugin, Notice, requestUrl } from 'obsidian';
 import { isSuccessStatus } from '../api/httpStatus';
 import { GDocsPluginSettings, GDocsTokens } from '../types';
 import { TokenStore } from './TokenStore';
+import { GoogleConnectionApi, GoogleConnectionResult } from './GoogleConnectionApi';
 
 type PluginWithSettings = Plugin & {
   settings: GDocsPluginSettings;
@@ -24,12 +25,21 @@ export function buildConnectUrl(authProxyUrl: string, state: string, host: unkno
   return `${authProxyUrl}/api/auth/start?state=${encodeURIComponent(state)}${callback}`;
 }
 
-export class GoogleAuth {
+const CONNECT_TIMEOUT_MS = 300_000; // 5 minutes
+
+interface PendingConnect {
+  promise: Promise<GoogleConnectionResult>;
+  resolve: (result: GoogleConnectionResult) => void;
+  reject: (err: Error) => void;
+  timeoutId: ReturnType<typeof setTimeout> | null;
+}
+
+export class GoogleAuth implements GoogleConnectionApi {
   private plugin: PluginWithSettings;
   private tokenStore: TokenStore;
 
-  // Holds the state UUID generated during connect() so the persistent
-  // protocol handler (registered in onload) can verify it on return.
+  // Holds the state UUID generated during requestConnection() so the
+  // persistent protocol handler (registered in onload) can verify it on return.
   private pendingState: string | null = null;
   private generation = 0;
   private writes: Promise<unknown> = Promise.resolve();
@@ -40,12 +50,23 @@ export class GoogleAuth {
     return next;
   }
 
-  // Called after successful auth so the settings tab can refresh its UI.
-  onConnected: (() => void) | null = null;
+  // Tracks an in-flight requestConnection() call so concurrent callers are
+  // deduped onto the same promise instead of racing separate OAuth flows.
+  private pendingConnect: PendingConnect | null = null;
+
+  private connectionListeners: Set<(connected: boolean, email: string | null) => void> = new Set();
 
   constructor(plugin: Plugin, tokenStore: TokenStore, private openAuthUrl: (url: string) => void | Promise<void> = url => window.require('electron').shell.openExternal(url)) {
     this.plugin = plugin as PluginWithSettings;
     this.tokenStore = tokenStore;
+  }
+
+  isConnected(): boolean {
+    return this.tokenStore.get() !== null;
+  }
+
+  getConnectedEmail(): string | null {
+    return this.plugin.settings.connectedEmail || null;
   }
 
   // Called from main.ts onload() via registerObsidianProtocolHandler.
@@ -63,12 +84,14 @@ export class GoogleAuth {
     if (!this.pendingState) {
       console.warn('[GDocsAuth] No pendingState — was connect() called first?');
       new Notice('⚠ GDocs Sync: No auth in progress. Please click Connect again.');
+      this.failPending(new Error('No auth in progress. Please click Connect again.'));
       return;
     }
 
     if (params['state'] !== this.pendingState) {
       console.warn('[GDocsAuth] OAuth state mismatch; callback rejected.');
       new Notice('⚠ GDocs Sync: OAuth state mismatch. Auth cancelled.');
+      this.failPending(new Error('OAuth state mismatch. Auth cancelled.'));
       return;
     }
 
@@ -83,6 +106,7 @@ export class GoogleAuth {
     if (!accessToken || !refreshToken) {
       console.error('[GDocsAuth] Missing tokens in callback params.');
       new Notice('⚠ GDocs Sync: Missing tokens in callback. Please try again.');
+      this.failPending(new Error('Missing tokens in callback. Please try again.'));
       return;
     }
 
@@ -126,23 +150,58 @@ export class GoogleAuth {
     }
     if (generation !== this.generation) return;
     new Notice('✓ Connected to Google');
-    console.log('[GDocsAuth] Calling onConnected callback...');
-    this.onConnected?.();
+    console.log('[GDocsAuth] Resolving pending connection...');
+    this.resolvePending({ email: this.getConnectedEmail() });
+    this.notifyConnectionChange();
     console.log('[GDocsAuth] Auth complete.');
   }
 
-  async connect(): Promise<void> {
+  requestConnection(options?: { force?: boolean }): Promise<GoogleConnectionResult> {
+    if (this.isConnected() && !options?.force) {
+      return Promise.resolve({ email: this.getConnectedEmail() });
+    }
+
+    if (this.pendingConnect) {
+      return this.pendingConnect.promise;
+    }
+
+    let resolveFn!: (result: GoogleConnectionResult) => void;
+    let rejectFn!: (err: Error) => void;
+    const promise = new Promise<GoogleConnectionResult>((resolve, reject) => {
+      resolveFn = resolve;
+      rejectFn = reject;
+    });
+
+    const pending: PendingConnect = {
+      promise,
+      resolve: resolveFn,
+      reject: rejectFn,
+      timeoutId: null,
+    };
+    this.pendingConnect = pending;
+
+    pending.timeoutId = setTimeout(() => {
+      this.failPending(new Error('Google sign-in timed out after 5 minutes. Please try again.'));
+    }, CONNECT_TIMEOUT_MS);
+
     const generation = ++this.generation;
     this.pendingState = crypto.randomUUID();
+    console.log('[GDocsAuth] requestConnection() called. pendingState set to:', this.pendingState);
+    console.log('[GDocsAuth] authProxyUrl:', this.plugin.settings.authProxyUrl);
 
     const geodeHost = (window as unknown as { geode?: { host?: unknown } }).geode?.host;
     const authUrl = buildConnectUrl(this.plugin.settings.authProxyUrl, this.pendingState, geodeHost);
     // Use Electron's shell.openExternal so the URL opens in the user's default
     // browser with their normal profile — window.open() hands off to Chrome
-    // without profile context, which causes it to open incognito.
-    await this.openAuthUrl(authUrl);
-    if (generation !== this.generation) return;
-    new Notice('Opening Google sign-in... Return here after authorizing.');
+    // without profile context, which causes it to open incognito. Fired
+    // without awaiting so requestConnection() keeps returning the same
+    // `pending.promise` reference synchronously for concurrent dedup callers.
+    Promise.resolve(this.openAuthUrl(authUrl)).then(() => {
+      if (generation !== this.generation) return;
+      new Notice('Opening Google sign-in... Return here after authorizing.');
+    });
+
+    return pending.promise;
   }
 
   async disconnect(): Promise<void> {
@@ -158,5 +217,50 @@ export class GoogleAuth {
     });
     if (generation !== this.generation) return;
     new Notice('Disconnected from Google.');
+    this.notifyConnectionChange();
+  }
+
+  onConnectionChange(callback: (connected: boolean, email: string | null) => void): () => void {
+    this.connectionListeners.add(callback);
+    return () => {
+      this.connectionListeners.delete(callback);
+    };
+  }
+
+  private resolvePending(result: GoogleConnectionResult): void {
+    const pending = this.pendingConnect;
+    if (!pending) return;
+    if (pending.timeoutId !== null) {
+      clearTimeout(pending.timeoutId);
+    }
+    this.pendingConnect = null;
+    pending.resolve(result);
+  }
+
+  private failPending(err: Error): void {
+    this.pendingState = null;
+    const pending = this.pendingConnect;
+    if (!pending) return;
+    if (pending.timeoutId !== null) {
+      clearTimeout(pending.timeoutId);
+    }
+    this.pendingConnect = null;
+    pending.reject(err);
+  }
+
+  private notifyConnectionChange(): void {
+    const connected = this.isConnected();
+    const email = this.getConnectedEmail();
+    this.plugin.app.workspace.trigger(
+      connected ? 'gdocs-sync:connected' : 'gdocs-sync:disconnected',
+      { email },
+    );
+    for (const listener of this.connectionListeners) {
+      try {
+        listener(connected, email);
+      } catch (e) {
+        console.error('[GDocsAuth] connection listener threw:', e);
+      }
+    }
   }
 }
