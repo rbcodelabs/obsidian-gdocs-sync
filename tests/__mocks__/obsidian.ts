@@ -2,8 +2,15 @@ import { vi } from 'vitest';
 
 // Minimal mock of the Obsidian API for unit tests.
 // Only stubs the symbols actually imported by the files under test.
+/**
+ * Every Notice message constructed during a test run, newest last. Tests that
+ * assert on user-visible notices can read (and reset) this.
+ */
+export const noticeLog: string[] = [];
 export class Notice {
-  constructor(public message: string) {}
+  constructor(public message: string) {
+    noticeLog.push(message);
+  }
 }
 export class Plugin {}
 export const requestUrl = vi.fn();

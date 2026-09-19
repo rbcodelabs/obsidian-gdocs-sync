@@ -1,4 +1,5 @@
 import { Plugin, Notice, TFile, parseYaml } from 'obsidian';
+import type { App, EventRef } from 'obsidian';
 import { GDocsPluginSettings, DEFAULT_SETTINGS } from './types';
 import { TokenStore } from './auth/TokenStore';
 import { GoogleAuth } from './auth/GoogleAuth';
@@ -20,6 +21,41 @@ import { pushNoteToGoogleDocs, pullNoteFromGoogleDocs } from './sync/SyncActions
 /** Shown when the host could support full vault sync but the user has not opted in. */
 export const FULL_VAULT_SYNC_OPT_IN_PENDING =
   'Off. Full vault sync is an unverified beta — turn it on above to register the Google Drive vault transport with Geode.';
+
+/** Upper bound on how long startup sync waits for the metadata cache. */
+export const METADATA_READY_TIMEOUT_MS = 10_000;
+
+/**
+ * Resolve once the workspace is up AND the metadata cache has finished (or is
+ * very likely to have finished) its initial index.
+ *
+ * Any frontmatter read through `metadataCache.getFileCache()` before that point
+ * comes back null for files Obsidian has not indexed yet, which makes already
+ * synced notes look brand new — the cause of duplicated Google Tasks on every
+ * vault start. The `resolved` event marks the end of the initial scan, but it
+ * does NOT fire again when the cache is already clean at subscribe time, so the
+ * timeout is a required second exit, not a safety net.
+ */
+export function whenVaultIndexed(
+  app: App,
+  timeoutMs: number = METADATA_READY_TIMEOUT_MS,
+): Promise<void> {
+  return new Promise<void>((resolve) => {
+    app.workspace.onLayoutReady(() => {
+      let settled = false;
+      let ref: EventRef | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (ref) app.metadataCache.offref(ref);
+        resolve();
+      };
+      const timer = setTimeout(finish, timeoutMs);
+      ref = app.metadataCache.on('resolved', finish);
+    });
+  });
+}
 
 export default class GDocsPlugin extends Plugin {
   settings!: GDocsPluginSettings;
@@ -51,6 +87,8 @@ export default class GDocsPlugin extends Plugin {
   /** Guards registerFullVaultSync() — Geode has no in-process unregister. */
   fullVaultSyncRegistered = false;
   fullVaultSyncWarnings: string[] = [];
+  /** Set in onunload() so the deferred startup sync aborts instead of resurrecting. */
+  private unloaded = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -291,41 +329,58 @@ export default class GDocsPlugin extends Plugin {
     });
 
     // ── Start sync engine ────────────────────────────────────────────────────
-    // Only start if the user is already connected (has valid tokens).
-    if (this.tokenStore.get() !== null) {
-      // Eagerly validate the token on startup so we immediately show
-      // "reconnect required" if the refresh token has been revoked — rather
-      // than waiting up to pollIntervalSeconds for the first poll to fire.
-      // If the access token is still fresh this is a no-op (no network call).
-      // Any auth error (invalid_grant, network failure, proxy error) means
-      // the user needs to reconnect — don't attempt to start the engine.
-      let tokenOk = false;
-      try {
-        await this.tokenStore.getValidAccessToken();
-        tokenOk = true;
-      } catch (err) {
-        console.error('[GDocsPlugin] Token validation failed on startup:', err);
-        this.statusBar.setReauthNeeded();
-      }
-
-      if (tokenOk) {
-        try {
-          await this.syncEngine.start();
-          this.statusBar.setIdle();
-          await this.startTasksSyncIfEnabled();
-        } catch (err) {
-          console.error('[GDocsPlugin] Failed to start sync engine:', err);
-          this.statusBar.setError('startup failed');
-        }
-      }
-    } else {
-      this.statusBar.setIdle();
-    }
+    // Deliberately not awaited: startup sync has to wait for Obsidian's metadata
+    // cache, which is not ready during onload(). See startupSync().
+    void this.startupSync();
 
     console.log('[GDocsPlugin] Loaded — Google Docs Sync v' + this.manifest.version);
   }
 
+  /**
+   * Start the sync engines on vault open, once Obsidian is actually ready.
+   *
+   * Running this inline in onload() meant both engines read frontmatter through
+   * a metadata cache that had not finished indexing, so every previously synced
+   * task note looked unlinked and got re-created locally and re-inserted in
+   * Google. Only the startup path is deferred — reconnect and command-palette
+   * invocations still run immediately, long after the cache is warm.
+   */
+  private async startupSync(): Promise<void> {
+    // Only start if the user is already connected (has valid tokens).
+    if (this.tokenStore.get() === null) {
+      this.statusBar.setIdle();
+      return;
+    }
+
+    await whenVaultIndexed(this.app);
+    if (this.unloaded) return;
+
+    // Eagerly validate the token on startup so we immediately show
+    // "reconnect required" if the refresh token has been revoked — rather
+    // than waiting up to pollIntervalSeconds for the first poll to fire.
+    // If the access token is still fresh this is a no-op (no network call).
+    // Any auth error (invalid_grant, network failure, proxy error) means
+    // the user needs to reconnect — don't attempt to start the engine.
+    try {
+      await this.tokenStore.getValidAccessToken();
+    } catch (err) {
+      console.error('[GDocsPlugin] Token validation failed on startup:', err);
+      this.statusBar.setReauthNeeded();
+      return;
+    }
+
+    try {
+      await this.syncEngine.start();
+      this.statusBar.setIdle();
+      await this.startTasksSyncIfEnabled();
+    } catch (err) {
+      console.error('[GDocsPlugin] Failed to start sync engine:', err);
+      this.statusBar.setError('startup failed');
+    }
+  }
+
   onunload(): void {
+    this.unloaded = true;
     this.syncEngine?.stop();
     this.tasksSyncEngine?.stop();
     this.fileCommandBar?.destroy();

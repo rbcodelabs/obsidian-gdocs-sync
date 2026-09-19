@@ -36,10 +36,70 @@ interface TaskRef {
   base: TaskFields;
 }
 
+/**
+ * How a note's link to a Google task resolved.
+ *
+ * `unknown` is the important one: it means we could not determine the note's
+ * frontmatter at all. Callers must treat it as "do nothing" — never as
+ * "unlinked" — because pushing an already-linked note creates a duplicate task
+ * in Google that nothing can undo, whereas skipping it costs one poll cycle.
+ */
+type TaskLink =
+  | { state: 'linked'; taskId: string; listId?: string; frontmatter: TaskFrontmatter }
+  | { state: 'unlinked'; frontmatter: TaskFrontmatter }
+  | { state: 'unknown' };
+
 // Strip a leading YAML frontmatter block, returning just the note body.
 function stripFrontmatter(content: string): string {
   const match = content.match(/^---\n[\s\S]*?\n---\n?([\s\S]*)$/);
   return match ? match[1].trimStart() : content;
+}
+
+/**
+ * Parse the top-level scalar entries of a note's frontmatter block straight
+ * from its raw text.
+ *
+ * Deliberately NOT a general YAML parser: it exists purely so the sync engine
+ * can recover its own bookkeeping keys when Obsidian's metadata cache has not
+ * indexed a file yet (vault cold start), and those keys are written by
+ * {@link TasksSyncEngine.yamlScalar} or Obsidian's own frontmatter processor —
+ * always plain or quoted scalars. Returns undefined when the note has no
+ * frontmatter block at all.
+ */
+export function parseFrontmatterScalars(raw: string): TaskFrontmatter | undefined {
+  const match = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+  if (!match) return undefined;
+
+  const frontmatter: TaskFrontmatter = {};
+  for (const line of match[1].split(/\r?\n/)) {
+    if (/^[\s-]/.test(line)) continue; // nested mapping or list item — not a top-level scalar
+    const idx = line.indexOf(':');
+    if (idx === -1) continue;
+    const key = line.slice(0, idx).trim();
+    if (!key) continue;
+    frontmatter[key] = parseScalar(line.slice(idx + 1).trim());
+  }
+  return frontmatter;
+}
+
+function parseScalar(raw: string): unknown {
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (raw.startsWith('"')) {
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return raw;
+    }
+  }
+  if (raw.length > 1 && raw.startsWith("'") && raw.endsWith("'")) {
+    return raw.slice(1, -1).replace(/''/g, "'");
+  }
+  return raw;
+}
+
+function asNonEmptyString(value: unknown): string | undefined {
+  return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
 // sha256 via Web Crypto (available in Electron/browser context)
@@ -59,6 +119,11 @@ export class TasksSyncEngine {
   // cache has already evicted the deleted file.
   private taskRefs: Map<string, TaskRef> = new Map();
   private taskIdToPath: Map<string, string> = new Map();
+
+  // taskId → path recovered by scanning the vault, built at most once per sync
+  // pass (null = not built yet). Rebuilt each pass so it can't go stale, but
+  // shared across the tasks within a pass so a full import is not O(tasks × files).
+  private scannedTaskIdToPath: Map<string, string> | null = null;
 
   // Per-list incremental cursor (RFC 3339). Undefined = never polled (full pull).
   private listCursors: Map<string, string> = new Map();
@@ -180,6 +245,7 @@ export class TasksSyncEngine {
 
   /** Import (create/update) notes for every task in every synced list. */
   async importAllLists(): Promise<{ imported: number; updated: number }> {
+    this.invalidateTaskIdIndex();
     const lists = await this.api.listTaskLists();
     const synced = this.selectSyncedLists(lists);
     this.knownListIds = new Set(synced.map((l) => l.id));
@@ -212,6 +278,7 @@ export class TasksSyncEngine {
 
   async poll(): Promise<void> {
     if (!this.plugin.settings.enableTasksSync) return;
+    this.invalidateTaskIdIndex();
 
     let lists: GoogleTaskList[];
     try {
@@ -272,7 +339,7 @@ export class TasksSyncEngine {
     task: GoogleTask,
     list: GoogleTaskList,
   ): Promise<'created' | 'updated' | 'unchanged'> {
-    const existingPath = this.taskIdToPath.get(task.id) ?? this.findPathByTaskId(task.id);
+    const existingPath = this.taskIdToPath.get(task.id) ?? (await this.findPathByTaskId(task.id));
 
     if (!existingPath) {
       return this.createTaskNote(task, list);
@@ -393,22 +460,31 @@ export class TasksSyncEngine {
   }
 
   private async _syncLocalToRemote(file: TFile): Promise<void> {
-    const cache = this.plugin.app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter as TaskFrontmatter | undefined;
-    const taskId = fm?.[FM.id] as string | undefined;
-    const listId = fm?.[FM.listId] as string | undefined;
+    const link = await this.resolveTaskLink(file);
+    // Frontmatter unreadable — say nothing to Google rather than risk a duplicate.
+    if (link.state === 'unknown') return;
 
+    const fm = link.frontmatter;
     const localFields = await this.readLocalFields(file, fm);
     const localHash = await sha256(canonicalizeFields(localFields));
 
     // New note the user authored in the tasks folder — create a real task.
-    if (!taskId || !listId) {
+    if (link.state === 'unlinked') {
       await this.createRemoteFromNote(file, localFields);
       return;
     }
 
+    const { taskId, listId } = link;
+    if (!listId) {
+      // Linked but missing its list id: it already exists in Google, so
+      // creating it again would duplicate it. Leave it for the next poll,
+      // which rewrites the list id from the remote task.
+      console.warn(`[TasksSyncEngine] ${file.path} has ${FM.id} but no ${FM.listId}; skipping push.`);
+      return;
+    }
+
     // Skip if the mutable fields are unchanged since the last sync.
-    const storedHash = fm?.[FM.hash] as string | undefined;
+    const storedHash = fm[FM.hash] as string | undefined;
     if (storedHash && storedHash === localHash) return;
 
     try {
@@ -470,9 +546,11 @@ export class TasksSyncEngine {
 
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
       if (!file.path.startsWith(folder + '/')) continue;
-      const cache = this.plugin.app.metadataCache.getFileCache(file);
-      const taskId = cache?.frontmatter?.[FM.id];
-      if (taskId) continue; // already linked
+      // Only push notes we can positively confirm are unlinked. 'linked' is
+      // already synced, and 'unknown' means we could not tell — pushing either
+      // would create a duplicate task in Google that nothing can undo.
+      const link = await this.resolveTaskLink(file);
+      if (link.state !== 'unlinked') continue;
       await this.syncLocalToRemote(file);
     }
   }
@@ -494,7 +572,7 @@ export class TasksSyncEngine {
 
   /** Remote task deleted → soft-delete the note (never hard-delete from a remote signal). */
   private async handleRemoteDelete(taskId: string): Promise<void> {
-    const path = this.taskIdToPath.get(taskId) ?? this.findPathByTaskId(taskId);
+    const path = this.taskIdToPath.get(taskId) ?? (await this.findPathByTaskId(taskId));
     if (!path) return;
     const file = this.plugin.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
@@ -520,7 +598,12 @@ export class TasksSyncEngine {
   private async readLocalFields(file: TFile, fmOverride?: TaskFrontmatter): Promise<TaskFields> {
     const raw = await this.plugin.app.vault.read(file);
     const body = stripFrontmatter(raw);
-    const fm = fmOverride ?? (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as TaskFrontmatter | undefined);
+    const fm =
+      fmOverride ??
+      (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as TaskFrontmatter | undefined) ??
+      // Cache cold — parse the block out of the content we just read, so the
+      // note's own title/completed/due aren't seen as empty and clobbered.
+      parseFrontmatterScalars(raw);
     return noteToFields(fm, body);
   }
 
@@ -626,16 +709,99 @@ export class TasksSyncEngine {
 
   private forgetPath(path: string): void {
     const ref = this.taskRefs.get(path);
-    if (ref) this.taskIdToPath.delete(ref.taskId);
+    if (ref) {
+      this.taskIdToPath.delete(ref.taskId);
+      this.scannedTaskIdToPath?.delete(ref.taskId);
+    }
     this.taskRefs.delete(path);
   }
 
   /** Fallback lookup by scanning frontmatter when the in-memory map misses. */
-  private findPathByTaskId(taskId: string): string | undefined {
-    for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-      const cache = this.plugin.app.metadataCache.getFileCache(file);
-      if (cache?.frontmatter?.[FM.id] === taskId) return file.path;
+  private async findPathByTaskId(taskId: string): Promise<string | undefined> {
+    if (!this.scannedTaskIdToPath) {
+      this.scannedTaskIdToPath = await this.scanTaskIdIndex();
     }
-    return undefined;
+    return this.scannedTaskIdToPath.get(taskId);
+  }
+
+  /** Drop the scanned index so the next lookup rebuilds it. */
+  private invalidateTaskIdIndex(): void {
+    this.scannedTaskIdToPath = null;
+  }
+
+  /**
+   * Build taskId → path over the whole vault. Notes inside the tasks folder get
+   * the disk-backed resolver (so a cold metadata cache can't hide them); notes
+   * outside it stay cache-only, preserving the previous behaviour for task notes
+   * the user has moved elsewhere without reading the entire vault off disk.
+   */
+  private async scanTaskIdIndex(): Promise<Map<string, string>> {
+    const index = new Map<string, string>();
+    for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      const link = this.isTaskFile(file)
+        ? await this.resolveTaskLink(file)
+        : this.cachedTaskLink(file);
+      // First match wins, matching the old linear-scan semantics.
+      if (link.state === 'linked' && !index.has(link.taskId)) {
+        index.set(link.taskId, file.path);
+      }
+    }
+    return index;
+  }
+
+  /** Read a note's task link from the metadata cache only (no disk access). */
+  private cachedTaskLink(file: TFile): TaskLink {
+    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
+      | TaskFrontmatter
+      | undefined;
+    if (!frontmatter) return { state: 'unknown' };
+    const taskId = asNonEmptyString(frontmatter[FM.id]);
+    if (!taskId) return { state: 'unlinked', frontmatter };
+    return {
+      state: 'linked',
+      taskId,
+      listId: asNonEmptyString(frontmatter[FM.listId]),
+      frontmatter,
+    };
+  }
+
+  /**
+   * Determine whether a note is already linked to a Google task, WITHOUT
+   * trusting the metadata cache to be warm.
+   *
+   * Right after a vault opens, `getFileCache()` returns null for files Obsidian
+   * has not indexed yet. Treating that as "no gtasks_id" made every previously
+   * imported task note look brand new, so each launch re-created its note and
+   * re-inserted the task in Google. When the cache has nothing for us, read the
+   * file and parse its frontmatter directly; if even that fails, report
+   * `unknown` so callers skip the note rather than duplicating it.
+   */
+  private async resolveTaskLink(file: TFile): Promise<TaskLink> {
+    const cached = this.cachedTaskLink(file);
+    if (cached.state === 'linked') return cached;
+
+    let raw: string;
+    try {
+      raw = await this.plugin.app.vault.cachedRead(file);
+    } catch (err) {
+      console.warn(`[TasksSyncEngine] Could not read ${file.path}; leaving it untouched.`, err);
+      return { state: 'unknown' };
+    }
+
+    const frontmatter = parseFrontmatterScalars(raw);
+    if (!frontmatter) return { state: 'unlinked', frontmatter: {} }; // no frontmatter block at all
+    if (!(FM.id in frontmatter)) return { state: 'unlinked', frontmatter };
+
+    const taskId = asNonEmptyString(frontmatter[FM.id]);
+    // The key is present but unusable — it IS a synced note, just an unreadable
+    // one. Fail closed: never push it as new.
+    if (!taskId) return { state: 'unknown' };
+
+    return {
+      state: 'linked',
+      taskId,
+      listId: asNonEmptyString(frontmatter[FM.listId]),
+      frontmatter,
+    };
   }
 }
