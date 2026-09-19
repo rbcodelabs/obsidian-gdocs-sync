@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { TFile } from 'obsidian';
+import { TFile, noticeLog } from 'obsidian';
 import { TasksSyncEngine } from '../../src/sync/TasksSyncEngine';
 import { FileWatcher } from '../../src/sync/FileWatcher';
 import { FM } from '../../src/converter/TaskNoteMapper';
@@ -63,6 +63,9 @@ function makeVault() {
     delete: [],
     rename: [],
   };
+  // Models Obsidian right after vault open: files are readable from disk but
+  // the metadata cache has not indexed them, so getFileCache() returns null.
+  let coldCache = false;
 
   const vault = {
     getFolderByPath: (p: string) => (folders.has(p) ? { path: p } : null),
@@ -76,6 +79,7 @@ function makeVault() {
     getAbstractFileByPath: (path: string) => (files.has(path) ? makeTFile(path) : null),
     getMarkdownFiles: () => Array.from(files.keys()).map(makeTFile),
     read: async (file: TFile) => files.get(file.path) ?? '',
+    cachedRead: async (file: TFile) => files.get(file.path) ?? '',
     modify: async (file: TFile, content: string) => {
       files.set(file.path, content);
     },
@@ -90,10 +94,15 @@ function makeVault() {
 
   const metadataCache = {
     getFileCache: (file: TFile) => {
+      if (coldCache) return null; // not indexed yet
       const content = files.get(file.path);
       if (content === undefined) return null;
       return { frontmatter: parseFM(content).fm };
     },
+  };
+
+  const setColdCache = (value: boolean) => {
+    coldCache = value;
   };
 
   const fileManager = {
@@ -105,7 +114,7 @@ function makeVault() {
     },
   };
 
-  return { vault, metadataCache, fileManager };
+  return { vault, metadataCache, fileManager, setColdCache };
 }
 
 function makeApi() {
@@ -120,7 +129,7 @@ function makeApi() {
 
 function makeEngine(apiOverrides: Partial<ReturnType<typeof makeApi>> = {}) {
   const api = { ...makeApi(), ...apiOverrides };
-  const { vault, metadataCache, fileManager } = makeVault();
+  const { vault, metadataCache, fileManager, setColdCache } = makeVault();
   const plugin = {
     settings: {
       enableTasksSync: true,
@@ -139,7 +148,7 @@ function makeEngine(apiOverrides: Partial<ReturnType<typeof makeApi>> = {}) {
     {} as never,
     fileWatcher,
   );
-  return { engine, api, vault, plugin };
+  return { engine, api, vault, plugin, setColdCache };
 }
 
 function task(overrides: Partial<GoogleTask> = {}): GoogleTask {
@@ -308,6 +317,79 @@ describe('TasksSyncEngine — local → remote', () => {
     await engine.syncLocalToRemote(makeTFile('Google Tasks/Buy milk.md'));
 
     expect(api.patchTask).not.toHaveBeenCalled();
+  });
+});
+
+describe('TasksSyncEngine — cold metadata cache on vault start', () => {
+  beforeEach(() => {
+    noticeLog.length = 0;
+  });
+
+  /** Frontmatter as a previous session left it on disk for task T1. */
+  function linkedFrontmatter(overrides: Record<string, unknown> = {}) {
+    return {
+      [FM.id]: 'T1',
+      [FM.listId]: 'L1',
+      [FM.listName]: 'Personal',
+      [FM.title]: 'Buy milk',
+      [FM.completed]: false,
+      [FM.position]: '',
+      [FM.updated]: '2026-08-02T10:00:00.000Z',
+      [FM.deleted]: false,
+      ...overrides,
+    };
+  }
+
+  it('reuses the existing note instead of creating a duplicate', async () => {
+    const listTasks = vi.fn().mockResolvedValue([task({ notes: 'body' })]);
+    const { engine, api, vault, setColdCache } = makeEngine({ listTasks });
+
+    // The note already exists on disk from a previous session…
+    const path = 'Google Tasks/Buy milk.md';
+    vault._files.set(path, serializeFM(linkedFrontmatter(), 'body'));
+    // …but Obsidian has not indexed the vault yet.
+    setColdCache(true);
+    const createSpy = vi.spyOn(vault, 'create');
+
+    const result = await engine.importAllLists();
+
+    expect(createSpy).not.toHaveBeenCalled();
+    expect(result.imported).toBe(0);
+    expect(Array.from(vault._files.keys())).toEqual([path]);
+    expect(api.patchTask).not.toHaveBeenCalled();
+  });
+
+  it('does not push an already-linked note to Google as a new task', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'DUPLICATE' }));
+    const { engine, api, vault, setColdCache } = makeEngine({
+      listTasks: vi.fn().mockResolvedValue([]),
+      insertTask,
+    });
+
+    vault._files.set('Google Tasks/Buy milk.md', serializeFM(linkedFrontmatter(), 'body'));
+    setColdCache(true);
+
+    await engine.poll();
+
+    expect(api.insertTask).not.toHaveBeenCalled();
+    expect(noticeLog.filter((m) => m.startsWith('Google Tasks: created'))).toEqual([]);
+  });
+
+  it('still pushes a genuinely unlinked note the user authored', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW', title: 'Water plants' }));
+    const { engine, api, vault, setColdCache } = makeEngine({
+      listTasks: vi.fn().mockResolvedValue([]),
+      insertTask,
+    });
+
+    vault._files.set('Google Tasks/Water plants.md', 'remember the ferns');
+    setColdCache(true);
+
+    await engine.poll();
+
+    expect(api.insertTask).toHaveBeenCalledTimes(1);
+    expect(api.insertTask.mock.calls[0][1].title).toBe('Water plants');
+    expect(noticeLog).toContain('Google Tasks: created "Water plants".');
   });
 });
 
