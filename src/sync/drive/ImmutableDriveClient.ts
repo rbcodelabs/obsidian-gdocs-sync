@@ -2,6 +2,39 @@ import { requestUrl, type RequestUrlParam, type RequestUrlResponse } from 'obsid
 
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const UPLOAD = 'https://www.googleapis.com/upload/drive/v3';
+const FOLDER_MIME = 'application/vnd.google-apps.folder';
+
+/**
+ * Post-upload read-back check. Returns the first field that disagrees, or null.
+ *
+ * `mimeType` is deliberately NOT compared by equality for blobs. Drive re-detects
+ * content type on upload: we declare `application/octet-stream`, and for any format
+ * Drive recognises (PNG, PDF, ...) it stores and returns the sniffed type instead.
+ * Comparing for equality therefore failed EVERY recognisable binary — one image in a
+ * vault aborted the whole first sync. Proven by discriminator: 2 KB of random bytes
+ * (no magic header) verified fine, while a 69-byte valid PNG failed.
+ *
+ * Content integrity does not depend on this field. `verify()` re-downloads the bytes
+ * and checks length plus sha256 immediately below, which is the real guarantee. What
+ * still matters structurally is the folder/blob distinction, so that is kept: a folder
+ * must still be a folder, and a blob must never come back as one. Only generic binary
+ * blobs permit MIME re-detection; JSON records and descriptors retain their declared
+ * MIME type so creation agrees with the history reader's schema checks.
+ */
+export function verifyMismatch(id: string, actual: any, expected: Omit<ImmutableCreate, 'operationKey'>): string | null {
+  if (!actual || typeof actual.version !== 'string') return 'missing or malformed metadata response';
+  if (actual.id !== id) return `id (expected ${id}, got ${String(actual.id)})`;
+  if (actual.trashed) return 'object is trashed';
+  if (actual.name !== expected.metadata.name) return `name (expected ${expected.metadata.name}, got ${String(actual.name)})`;
+  const wantFolder = expected.metadata.mimeType === FOLDER_MIME;
+  if (wantFolder && actual.mimeType !== FOLDER_MIME) return `mimeType (expected a folder, got ${String(actual.mimeType)})`;
+  if (!wantFolder && actual.mimeType === FOLDER_MIME) return 'mimeType (blob came back as a folder)';
+  if (expected.metadata.mimeType !== 'application/octet-stream' && actual.mimeType !== expected.metadata.mimeType) return `mimeType (expected ${expected.metadata.mimeType}, got ${String(actual.mimeType)})`;
+  if (expected.metadata.parents && canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents)) return 'parents';
+  if (canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties)) return 'appProperties';
+  if (!wantFolder && Number(actual.size) !== expected.data.byteLength) return `size (expected ${expected.data.byteLength}, got ${String(actual.size)})`;
+  return null;
+}
 export const MAX_BLOB_SIZE = 100 * 1024 * 1024;
 
 export interface DriveAuth {
@@ -145,11 +178,8 @@ export class ImmutableDriveClient {
   async verify(id: string, expected: Omit<ImmutableCreate, 'operationKey'>, signal: AbortSignal): Promise<string> {
     const response = await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?fields=id,name,mimeType,parents,appProperties,size,trashed,version` }, signal);
     const actual = response.json;
-    if (!actual || typeof actual.version !== 'string' || actual.id !== id || actual.trashed || actual.name !== expected.metadata.name || actual.mimeType !== expected.metadata.mimeType ||
-      (expected.metadata.parents && canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents)) ||
-      canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties) || (expected.metadata.mimeType !== 'application/vnd.google-apps.folder' && Number(actual.size) !== expected.data.byteLength)) {
-      throw new Error('Immutable object integrity failure: metadata mismatch');
-    }
+    const mismatch = verifyMismatch(id, actual, expected);
+    if (mismatch) throw new Error(`Immutable object integrity failure: ${mismatch}`);
     if (expected.metadata.mimeType === 'application/vnd.google-apps.folder') return actual.version;
     const bytes = (await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?alt=media` }, signal)).arrayBuffer;
     if (bytes.byteLength !== expected.data.byteLength || await sha256Bytes(bytes) !== expected.sha256) throw new Error('Immutable object integrity failure: content mismatch');

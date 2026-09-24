@@ -196,3 +196,72 @@ describe('immutable Drive create', () => {
     expect(requestUrl).toHaveBeenCalledTimes(2);
   });
 });
+
+describe('read-back verification tolerates Drive rewriting a blob mimeType', () => {
+  beforeEach(() => { vi.mocked(requestUrl).mockReset(); });
+
+  // Regression: Drive re-detects content type on upload. We declare
+  // application/octet-stream; for any format it recognises it returns the sniffed
+  // type. Comparing mimeType by equality failed every recognisable binary, so one
+  // image in a vault aborted the entire first sync.
+  const verifyReturning = (overrides: Record<string, unknown>) => {
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(200, { ids: ['reserved-id'] }) as never)
+      .mockResolvedValueOnce(response(200, { id: 'reserved-id' }) as never)
+      .mockResolvedValueOnce(response(200, { id: 'reserved-id', ...metadata, size: String(bytes.byteLength), version: '1', trashed: false, ...overrides }) as never)
+      .mockResolvedValueOnce(response(200, {}, bytes) as never);
+  };
+
+  it('accepts a blob whose mimeType Drive replaced with the sniffed type', async () => {
+    verifyReturning({ mimeType: 'image/png' });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'png', metadata, data: bytes, sha256 }, signal())).resolves.toBe('reserved-id');
+  });
+
+  it.each(['text/plain', 'application/octet-stream'])('rejects JSON metadata returned as %s before reading content', async mimeType => {
+    verifyReturning({ mimeType });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'json', metadata: { ...metadata, mimeType: 'application/json' }, data: bytes, sha256 }, signal()))
+      .rejects.toThrow(/mimeType.*application\/json/);
+    expect(requestUrl).toHaveBeenCalledTimes(3);
+  });
+
+  it('accepts JSON metadata retaining its declared MIME type', async () => {
+    verifyReturning({ mimeType: 'application/json' });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'json', metadata: { ...metadata, mimeType: 'application/json' }, data: bytes, sha256 }, signal()))
+      .resolves.toBe('reserved-id');
+    expect(requestUrl).toHaveBeenCalledTimes(4);
+  });
+
+  it('still rejects a blob that comes back as a folder', async () => {
+    verifyReturning({ mimeType: 'application/vnd.google-apps.folder' });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'as-folder', metadata, data: bytes, sha256 }, signal()))
+      .rejects.toThrow(/blob came back as a folder/);
+  });
+
+  it('still rejects a folder that does not come back as a folder', async () => {
+    const folder = { name: 'Synthetic vault', mimeType: 'application/vnd.google-apps.folder', appProperties: { geodeVaultId: 'vault', geodeObjectKind: 'root' } };
+    const empty = new ArrayBuffer(0);
+    const hash = createHash('sha256').update(new Uint8Array(empty)).digest('hex');
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(200, { id: 'folder-id' }) as never)
+      .mockResolvedValueOnce(response(200, { id: 'folder-id', ...folder, mimeType: 'application/octet-stream', version: '1', trashed: false }) as never);
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'root', driveId: 'folder-id', metadata: folder, data: empty, sha256: hash }, signal()))
+      .rejects.toThrow(/expected a folder/);
+  });
+
+  it('still rejects a size mismatch, and names the field', async () => {
+    verifyReturning({ size: '999' });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'bad-size', metadata, data: bytes, sha256 }, signal()))
+      .rejects.toThrow(/size \(expected 25, got 999\)/);
+  });
+
+  it('still rejects tampered appProperties', async () => {
+    verifyReturning({ appProperties: { geodeVaultId: 'other-vault', geodeObjectKind: 'blob' } });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'bad-props', metadata, data: bytes, sha256 }, signal()))
+      .rejects.toThrow(/appProperties/);
+  });
+});
