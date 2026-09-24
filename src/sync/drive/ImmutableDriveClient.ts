@@ -17,7 +17,9 @@ const FOLDER_MIME = 'application/vnd.google-apps.folder';
  * Content integrity does not depend on this field. `verify()` re-downloads the bytes
  * and checks length plus sha256 immediately below, which is the real guarantee. What
  * still matters structurally is the folder/blob distinction, so that is kept: a folder
- * must still be a folder, and a blob must never come back as one.
+ * must still be a folder, and a blob must never come back as one. Only generic binary
+ * blobs permit MIME re-detection; JSON records and descriptors retain their declared
+ * MIME type so creation agrees with the history reader's schema checks.
  */
 export function verifyMismatch(id: string, actual: any, expected: Omit<ImmutableCreate, 'operationKey'>): string | null {
   if (!actual || typeof actual.version !== 'string') return 'missing or malformed metadata response';
@@ -27,6 +29,7 @@ export function verifyMismatch(id: string, actual: any, expected: Omit<Immutable
   const wantFolder = expected.metadata.mimeType === FOLDER_MIME;
   if (wantFolder && actual.mimeType !== FOLDER_MIME) return `mimeType (expected a folder, got ${String(actual.mimeType)})`;
   if (!wantFolder && actual.mimeType === FOLDER_MIME) return 'mimeType (blob came back as a folder)';
+  if (expected.metadata.mimeType !== 'application/octet-stream' && actual.mimeType !== expected.metadata.mimeType) return `mimeType (expected ${expected.metadata.mimeType}, got ${String(actual.mimeType)})`;
   if (expected.metadata.parents && canonicalJson(actual.parents ?? []) !== canonicalJson(expected.metadata.parents)) return 'parents';
   if (canonicalJson(actual.appProperties ?? {}) !== canonicalJson(expected.metadata.appProperties)) return 'appProperties';
   if (!wantFolder && Number(actual.size) !== expected.data.byteLength) return `size (expected ${expected.data.byteLength}, got ${String(actual.size)})`;

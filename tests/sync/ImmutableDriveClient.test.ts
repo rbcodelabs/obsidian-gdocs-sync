@@ -217,6 +217,22 @@ describe('read-back verification tolerates Drive rewriting a blob mimeType', () 
     await expect(f.client.create({ operationKey: 'png', metadata, data: bytes, sha256 }, signal())).resolves.toBe('reserved-id');
   });
 
+  it.each(['text/plain', 'application/octet-stream'])('rejects JSON metadata returned as %s before reading content', async mimeType => {
+    verifyReturning({ mimeType });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'json', metadata: { ...metadata, mimeType: 'application/json' }, data: bytes, sha256 }, signal()))
+      .rejects.toThrow(/mimeType.*application\/json/);
+    expect(requestUrl).toHaveBeenCalledTimes(3);
+  });
+
+  it('accepts JSON metadata retaining its declared MIME type', async () => {
+    verifyReturning({ mimeType: 'application/json' });
+    const f = fixture();
+    await expect(f.client.create({ operationKey: 'json', metadata: { ...metadata, mimeType: 'application/json' }, data: bytes, sha256 }, signal()))
+      .resolves.toBe('reserved-id');
+    expect(requestUrl).toHaveBeenCalledTimes(4);
+  });
+
   it('still rejects a blob that comes back as a folder', async () => {
     verifyReturning({ mimeType: 'application/vnd.google-apps.folder' });
     const f = fixture();
