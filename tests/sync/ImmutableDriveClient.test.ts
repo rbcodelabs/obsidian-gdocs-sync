@@ -1,7 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { requestUrl, type RequestUrlParam } from 'obsidian';
 import { createHash } from 'node:crypto';
-import { canonicalJson, ImmutableDriveClient, type ReservedObject } from '../../src/sync/drive/ImmutableDriveClient';
+import { canonicalJson, DEFAULT_REQUEST_TIMEOUT_MS, ImmutableDriveClient, MIN_TRANSFER_BYTES_PER_SECOND, type ReservedObject } from '../../src/sync/drive/ImmutableDriveClient';
 
 const bytes = new TextEncoder().encode('synthetic immutable bytes').buffer;
 const sha256 = 'e7d3439a31f306feb8f4ada89efe6fb145a70a8f15417cf25e4ae1bd983063c4';
@@ -194,6 +194,122 @@ describe('immutable Drive create', () => {
     await expect(f.client.create({ operationKey: 'op', metadata, data: bytes, sha256 }, abort.signal)).rejects.toMatchObject({ name: 'AbortError' });
     expect(f.persisted().op.id).toBe('reserved-id');
     expect(requestUrl).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('per-attempt request timeout', () => {
+  beforeEach(() => { vi.mocked(requestUrl).mockReset(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  // Hands out a manually-controlled timeout signal per attempt so a test can
+  // fire "the deadline" deterministically instead of waiting 45 real seconds.
+  function manualTimeouts() {
+    const issued: Array<{ ms: number; controller: AbortController }> = [];
+    const timeoutSignal = vi.fn((ms: number) => { const controller = new AbortController(); issued.push({ ms, controller }); return controller.signal; });
+    return { issued, timeoutSignal };
+  }
+  // A transport that never settles and ignores its signal: the worst case,
+  // where only the client-side race can end the wait.
+  const hang = () => vi.mocked(requestUrl).mockImplementation(() => new Promise(() => {}) as never);
+  const nextCall = async (count: number) => { await vi.waitFor(() => expect(requestUrl).toHaveBeenCalledTimes(count)); };
+
+  it('retries a hung request after each timeout and fails within the bounded attempt count', async () => {
+    const f = fixture(); const timeouts = manualTimeouts(); hang();
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, random: () => 0, timeoutSignal: timeouts.timeoutSignal });
+    const caller = new AbortController();
+    const result = client.request({ url: 'https://www.googleapis.com/drive/v3/files?q=x' }, caller.signal);
+    const settled = expect(result).rejects.toThrow('Drive request interrupted');
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await nextCall(attempt);
+      timeouts.issued[attempt - 1].controller.abort(new DOMException('timed out', 'TimeoutError'));
+    }
+    await settled;
+    expect(requestUrl).toHaveBeenCalledTimes(4);
+    expect(f.sleep).toHaveBeenCalledTimes(3);
+    // A timeout is not a cancellation: the caller's own signal is never tripped.
+    expect(caller.signal.aborted).toBe(false);
+  });
+
+  it('recovers when a retry after a timeout succeeds', async () => {
+    const f = fixture(); const timeouts = manualTimeouts();
+    vi.mocked(requestUrl).mockImplementationOnce(() => new Promise(() => {}) as never).mockResolvedValueOnce(response(200, { ok: true }) as never);
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, random: () => 0, timeoutSignal: timeouts.timeoutSignal });
+    const result = client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal());
+    await nextCall(1); timeouts.issued[0].controller.abort();
+    await expect(result).resolves.toMatchObject({ status: 200, json: { ok: true } });
+    expect(f.sleep).toHaveBeenCalledOnce();
+  });
+
+  it('does not retry a timed-out request when the caller disabled retries', async () => {
+    const f = fixture(); const timeouts = manualTimeouts(); hang();
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, timeoutSignal: timeouts.timeoutSignal });
+    const result = client.request({ url: 'https://www.googleapis.com/upload/drive/v3/files', method: 'PUT' }, signal(), [308], false);
+    const settled = expect(result).rejects.toThrow('Drive request interrupted');
+    await nextCall(1); timeouts.issued[0].controller.abort();
+    await settled;
+    expect(requestUrl).toHaveBeenCalledOnce();
+  });
+
+  it('still ends a hung request immediately on real cancellation, as an AbortError without retrying', async () => {
+    const f = fixture(); const timeouts = manualTimeouts(); hang();
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, timeoutSignal: timeouts.timeoutSignal });
+    const caller = new AbortController();
+    const result = client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, caller.signal);
+    const settled = expect(result).rejects.toMatchObject({ name: 'AbortError' });
+    await nextCall(1); caller.abort();
+    await settled;
+    expect(requestUrl).toHaveBeenCalledOnce();
+    expect(f.sleep).not.toHaveBeenCalled();
+  });
+
+  it('hands the transport a signal that fires on timeout, so a real fetch is torn down', async () => {
+    const f = fixture(); const timeouts = manualTimeouts(); hang();
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, timeoutSignal: timeouts.timeoutSignal });
+    const result = client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal(), [], false);
+    const settled = expect(result).rejects.toThrow();
+    await nextCall(1);
+    const sent = (vi.mocked(requestUrl).mock.calls[0][0] as RequestUrlParam & { signal: AbortSignal }).signal;
+    expect(sent.aborted).toBe(false);
+    timeouts.issued[0].controller.abort();
+    await settled;
+    expect(sent.aborted).toBe(true);
+  });
+
+  it('defaults to a 45 second deadline per attempt via AbortSignal.timeout', async () => {
+    const f = fixture();
+    const spy = vi.spyOn(AbortSignal, 'timeout');
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(200) as never);
+    await f.client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal());
+    expect(DEFAULT_REQUEST_TIMEOUT_MS).toBe(45_000);
+    expect(spy).toHaveBeenCalledWith(45_000);
+  });
+
+  it('honors a configured base timeout', async () => {
+    const f = fixture(); const timeouts = manualTimeouts();
+    vi.mocked(requestUrl).mockResolvedValueOnce(response(200) as never);
+    await new ImmutableDriveClient(f.auth, f.journal, { requestTimeoutMs: 1234, timeoutSignal: timeouts.timeoutSignal }).request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal());
+    expect(timeouts.issued.map(entry => entry.ms)).toEqual([1234]);
+  });
+
+  it('extends the deadline for large transfers so slow-but-live uploads and downloads are not killed', async () => {
+    const f = fixture(); const timeouts = manualTimeouts();
+    vi.mocked(requestUrl).mockResolvedValue(response(200) as never);
+    const client = new ImmutableDriveClient(f.auth, f.journal, { requestTimeoutMs: 1000, timeoutSignal: timeouts.timeoutSignal });
+    const chunk = new ArrayBuffer(4 * 1024 * 1024);
+    await client.request({ url: 'https://www.googleapis.com/upload/drive/v3/files', method: 'PUT', body: chunk }, signal());
+    await client.request({ url: 'https://www.googleapis.com/drive/v3/files/id?alt=media' }, signal(), [], true, { expectedBytes: chunk.byteLength });
+    await client.request({ url: 'https://www.googleapis.com/drive/v3/files', method: 'POST', body: '{"small":true}' }, signal());
+    const allowance = Math.ceil(chunk.byteLength / MIN_TRANSFER_BYTES_PER_SECOND * 1000);
+    expect(timeouts.issued.map(entry => entry.ms)).toEqual([1000 + allowance, 1000 + allowance, 1000 + Math.ceil(14 / MIN_TRANSFER_BYTES_PER_SECOND * 1000)]);
+  });
+
+  it('bounds a real hung request in wall-clock time with the default timeout implementation', async () => {
+    const f = fixture(); hang();
+    const client = new ImmutableDriveClient(f.auth, f.journal, { sleep: f.sleep, requestTimeoutMs: 20 });
+    const started = Date.now();
+    await expect(client.request({ url: 'https://www.googleapis.com/drive/v3/about' }, signal())).rejects.toThrow('Drive request interrupted');
+    expect(requestUrl).toHaveBeenCalledTimes(4);
+    expect(Date.now() - started).toBeLessThan(5000);
   });
 });
 
