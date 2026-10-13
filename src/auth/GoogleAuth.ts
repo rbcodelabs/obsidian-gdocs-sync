@@ -3,6 +3,7 @@ import { isSuccessStatus } from '../api/httpStatus';
 import { GDocsPluginSettings, GDocsTokens } from '../types';
 import { TokenStore } from './TokenStore';
 import { GoogleConnectionApi, GoogleConnectionResult } from './GoogleConnectionApi';
+import { openAuthUrl as openAuthUrlDefault, getGeodeHostMarker } from './openAuthUrl';
 
 type PluginWithSettings = Plugin & {
   settings: GDocsPluginSettings;
@@ -56,7 +57,7 @@ export class GoogleAuth implements GoogleConnectionApi {
 
   private connectionListeners: Set<(connected: boolean, email: string | null) => void> = new Set();
 
-  constructor(plugin: Plugin, tokenStore: TokenStore, private openAuthUrl: (url: string) => void | Promise<void> = url => window.require('electron').shell.openExternal(url)) {
+  constructor(plugin: Plugin, tokenStore: TokenStore, private openAuthUrl: (url: string) => void | Promise<void> = url => openAuthUrlDefault(url)) {
     this.plugin = plugin as PluginWithSettings;
     this.tokenStore = tokenStore;
   }
@@ -189,16 +190,26 @@ export class GoogleAuth implements GoogleConnectionApi {
     console.log('[GDocsAuth] requestConnection() called. pendingState set to:', this.pendingState);
     console.log('[GDocsAuth] authProxyUrl:', this.plugin.settings.authProxyUrl);
 
-    const geodeHost = (window as unknown as { geode?: { host?: unknown } }).geode?.host;
+    const geodeHost = getGeodeHostMarker();
     const authUrl = buildConnectUrl(this.plugin.settings.authProxyUrl, this.pendingState, geodeHost);
-    // Use Electron's shell.openExternal so the URL opens in the user's default
-    // browser with their normal profile — window.open() hands off to Chrome
-    // without profile context, which causes it to open incognito. Fired
-    // without awaiting so requestConnection() keeps returning the same
-    // `pending.promise` reference synchronously for concurrent dedup callers.
-    Promise.resolve(this.openAuthUrl(authUrl)).then(() => {
+    // The default opener picks Electron's shell.openExternal on desktop and
+    // window.open on mobile (see openAuthUrl.ts). Fired without awaiting so
+    // requestConnection() keeps returning the same `pending.promise`
+    // reference synchronously for concurrent dedup callers.
+    let opened: Promise<void>;
+    try {
+      opened = Promise.resolve(this.openAuthUrl(authUrl));
+    } catch (err) {
+      opened = Promise.reject(err);
+    }
+    opened.then(() => {
       if (generation !== this.generation) return;
       new Notice('Opening Google sign-in... Return here after authorizing.');
+    }).catch((err: unknown) => {
+      if (generation !== this.generation) return;
+      console.error('[GDocsAuth] Could not open the sign-in page:', err);
+      new Notice('⚠ GDocs Sync: Could not open the browser for Google sign-in.');
+      this.failPending(new Error('Could not open the browser for Google sign-in.'));
     });
 
     return pending.promise;

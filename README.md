@@ -138,6 +138,15 @@ Output: `main.js` in the project root (the file Obsidian loads).
 
 When hosted by Geode, the plugin detects the explicit `window.geode.host` marker and asks the auth proxy to return through `geode://gdocs-sync`. In Obsidian the existing `obsidian://gdocs-sync` flow is unchanged.
 
+### Mobile (Geode iOS, Obsidian mobile)
+
+The plugin is not desktop-only. It uses no Node or Electron APIs at load or sync time; the production bundle is checked for this (`tests/build/mobileBundle.test.ts`, `node scripts/check-bundle.mjs`).
+
+- **Sign-in:** the auth URL opens with Electron's `shell.openExternal` on desktop and `window.open(url, '_blank')` where Electron is absent (mobile routes this to the native browser). The result returns through the `gdocs-sync` protocol handler (`geode://gdocs-sync` on Geode).
+- **Secrets:** tokens use `loadSecret`/`saveSecret`/`removeSecret` (Keychain-backed on Geode mobile). Without them the plugin behaves as on desktop: Docs and Tasks sync keep working, full-vault sync stays blocked.
+- **Status bar:** mobile hides it, so use the **Show Google Docs sync status** command.
+- Pollers are plain timers, so they pause while the app is suspended and resume on return to the foreground.
+
 **Requirements:** Node 18+, TypeScript 5.x
 
 ---

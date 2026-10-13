@@ -13,6 +13,13 @@ export class Notice {
   }
 }
 export class Plugin {}
+/** Mutable so tests can simulate desktop vs. Geode/Obsidian mobile. */
+export const Platform = {
+  isMobile: false,
+  isMobileApp: false,
+  isDesktop: true,
+  isDesktopApp: true,
+};
 export const requestUrl = vi.fn();
 export class Modal {
   constructor(public app: unknown) {}

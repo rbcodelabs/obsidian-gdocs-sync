@@ -7,6 +7,7 @@ import {
   TextComponent,
   ToggleComponent,
   Notice,
+  Platform,
 } from 'obsidian';
 import { GDocsPluginSettings, FolderMapping } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
@@ -54,6 +55,12 @@ export class GDocsSettingTab extends PluginSettingTab {
 
     // ── Section 1: Google Account ───────────────────────────────────────────
     containerEl.createEl('h2', { text: 'Google Account' });
+    if (Platform.isMobile) {
+      containerEl.createEl('p', {
+        text: 'Connecting opens Google sign-in in your browser; return here when it finishes. The status bar is not shown on mobile — run “Show Google Docs sync status” from the command palette instead.',
+        cls: 'setting-item-description gdocs-mobile-note',
+      });
+    }
 
     const { connectedEmail } = this.pluginInstance.settings;
     const isConnected = this.pluginInstance.tokenStore.get() !== null;

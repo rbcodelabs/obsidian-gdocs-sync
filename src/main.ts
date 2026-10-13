@@ -160,6 +160,15 @@ export default class GDocsPlugin extends Plugin {
 
     // ── Commands ────────────────────────────────────────────────────────────
 
+    // Mobile hosts hide the status bar, so expose the status modal as a command too.
+    this.addCommand({
+      id: 'show-sync-status',
+      name: 'Show Google Docs sync status',
+      callback: () => {
+        new SyncStatusModal(this.app, this as unknown as GDocsPluginInterface).open();
+      },
+    });
+
     // Sync the currently active note to Google Docs
     this.addCommand({
       id: 'sync-current-note',

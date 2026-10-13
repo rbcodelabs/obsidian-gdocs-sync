@@ -1,5 +1,14 @@
 /* ── GDocs Sync plugin styles ─────────────────────────────────────────────── */
 
+/* Narrow viewports (mobile): let wide tables scroll instead of overflowing */
+.gdocs-status-modal {
+  overflow-x: auto;
+}
+
+.gdocs-mobile-note {
+  margin-top: 0;
+}
+
 /* Status modal */
 .gdocs-status-modal .gdocs-status-section {
   margin-bottom: 1.2em;
