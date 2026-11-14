@@ -544,8 +544,9 @@
 }
 .gtasks-view.is-wide .gtasks-view-add { padding: 10px 20px; }
 .gtasks-view-add-input { flex: 1; min-width: 0; }
-.gtasks-view-add-list { flex: none; width: 76px; min-width: 0; }
-.gtasks-view.is-wide .gtasks-view-add-list { width: 120px; }
+/* Wide enough for typical list names ("Errands"); ellipsis only beyond max-width. The input stays flexible. */
+.gtasks-view-add-list { flex: 0 1 auto; min-width: 96px; max-width: 120px; }
+.gtasks-view.is-wide .gtasks-view-add-list { min-width: 120px; max-width: 200px; }
 .gtasks-view-add-list select { width: 100%; font-size: var(--font-ui-small); color: var(--text-muted); text-overflow: ellipsis; }
 .gtasks-view-add-btn { width: 28px; height: 28px; padding: 0; background: var(--interactive-accent); color: var(--text-on-accent); }
 .gtasks-view-add-btn:hover:not(:disabled) { background: var(--interactive-accent-hover, var(--interactive-accent)); color: var(--text-on-accent); }
