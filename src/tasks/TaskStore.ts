@@ -72,8 +72,18 @@ function dayDiff(from: string, to: string): number {
   return Math.round((Date.UTC(ty, tm - 1, td) - Date.UTC(fy, fm - 1, fd)) / 86_400_000);
 }
 
+/** True for a real calendar date in 'YYYY-MM-DD' form (rejects '2026-13-45', 'tomorrow', ...). */
+export function isValidDateOnly(value: string): boolean {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!m) return false;
+  const [y, mo, d] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (y < 1 || mo < 1 || mo > 12 || d < 1) return false;
+  return d <= new Date(Date.UTC(y, mo, 0)).getUTCDate();
+}
+
 export function dueLabel(due: string, today: string, locale?: string): string {
-  if (!due) return '';
+  // A hand-edited, non-date value must never reach the chip as "Invalid Date".
+  if (!due || !isValidDateOnly(due)) return '';
   const diff = dayDiff(today, due);
   if (diff === 0) return 'Today';
   if (diff === 1) return 'Tomorrow';
@@ -91,8 +101,11 @@ function str(value: unknown): string {
 
 function normaliseDue(value: unknown): string {
   if (!value) return '';
-  if (value instanceof Date) return value.toISOString().slice(0, 10);
-  return dueToDateOnly(String(value));
+  // Local getters: a Date parsed from a bare YAML date is a local calendar day.
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? '' : localDateString(value);
+  const due = dueToDateOnly(String(value));
+  // Hand-edited garbage is treated as "no date" rather than bucketed or rendered.
+  return isValidDateOnly(due) ? due : '';
 }
 
 function inFolder(path: string, folder: string): boolean {
@@ -151,12 +164,17 @@ export function matchesFilter(
   return b === 'Overdue';
 }
 
+/**
+ * Tab counts are the number of TOP-LEVEL rows the matching tab shows (open
+ * sections only), so a tab badge always equals the sum of its section counts;
+ * subtasks nest under their parent and are not counted separately.
+ */
 export function countTasks(tasks: TaskItem[], listId: string | null, today: string): TaskCounts {
-  return {
-    today: tasks.filter((t) => matchesFilter(t, 'today', listId, today)).length,
-    upcoming: tasks.filter((t) => matchesFilter(t, 'upcoming', listId, today)).length,
-    overdue: tasks.filter((t) => matchesFilter(t, 'overdue', listId, today)).length,
-  };
+  const rows = (filter: TaskFilter) =>
+    groupTasks(tasks, filter, listId, today)
+      .filter((g) => g.bucket !== 'Completed')
+      .reduce((n, g) => n + g.count, 0);
+  return { today: rows('today'), upcoming: rows('upcoming'), overdue: rows('overdue') };
 }
 
 // ─── Tree ────────────────────────────────────────────────────────────────────
@@ -181,19 +199,30 @@ function compareTasks(a: TaskItem, b: TaskItem): number {
 }
 
 /**
- * Nest subtasks under their parent. A subtask whose parent is not in `tasks`
- * (filtered out, other list, or missing) is promoted to top level so it never
- * silently disappears.
+ * Nest subtasks under their parent (one level, as Google allows). Anything that
+ * cannot be shown as a direct child of a top-level row is promoted to top level
+ * so it never silently disappears: a missing parent, a parent-id cycle, a third
+ * nesting level, or an OPEN subtask of a COMPLETED parent (which would otherwise
+ * hide inside the collapsed Completed section).
  */
 export function buildTree(tasks: TaskItem[]): TaskNode[] {
   const byId = new Map(tasks.map((t) => [t.id, t]));
+  const candidate = (t: TaskItem): TaskItem | undefined => {
+    const parent = t.parentId && t.parentId !== t.id ? byId.get(t.parentId) : undefined;
+    if (!parent) return undefined;
+    return t.completed === false && parent.completed ? undefined : parent;
+  };
+  // Pass 1: tasks that point at a usable parent. Pass 2: of those, only the ones
+  // whose parent is itself top-level really nest; the rest are promoted.
+  const nested = new Set(tasks.filter((t) => candidate(t) !== undefined));
   const kids = new Map<string, TaskItem[]>();
   const roots: TaskItem[] = [];
   for (const t of tasks) {
-    if (t.parentId && t.parentId !== t.id && byId.has(t.parentId)) {
-      const list = kids.get(t.parentId) ?? [];
+    const parent = candidate(t);
+    if (parent && !nested.has(parent)) {
+      const list = kids.get(parent.id) ?? [];
       list.push(t);
-      kids.set(t.parentId, list);
+      kids.set(parent.id, list);
     } else {
       roots.push(t);
     }

@@ -1,4 +1,5 @@
 import type { App, TFile } from 'obsidian';
+import { isValidDateOnly } from './TaskStore';
 import { FM, sanitizeFilename, disambiguateFilename } from '../converter/TaskNoteMapper';
 
 /**
@@ -35,8 +36,8 @@ export class TaskActions {
 
   /** `null` clears the due date. */
   setDue(path: string, due: string | null): Promise<void> {
-    if (due !== null && !DATE_ONLY.test(due)) {
-      return Promise.reject(new Error('Due date must be YYYY-MM-DD.'));
+    if (due !== null && !(DATE_ONLY.test(due) && isValidDateOnly(due))) {
+      return Promise.reject(new Error('Due date must be a real date in YYYY-MM-DD form.'));
     }
     return this.write(path, (fm) => {
       if (due) fm[FM.due] = due;
@@ -111,6 +112,10 @@ export class TaskActions {
    * a note that is open in an editor with unsaved edits — a later editor save
    * could clobber the change. Flush any editor open on this note first; if it
    * cannot be saved, abort the write rather than risk losing either side.
+   *
+   * Residual window (documented, not fixed): keystrokes typed between this save
+   * and processFrontMatter's write can still be lost. We could not verify whether
+   * Geode's processFrontMatter already merges with open editor buffers.
    */
   private async flushOpenEditors(path: string): Promise<void> {
     for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {

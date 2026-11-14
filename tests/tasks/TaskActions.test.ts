@@ -73,7 +73,7 @@ describe('TaskActions frontmatter writes', () => {
     expect(fm.get(PATH)![FM.title]).toBe('Beta');
   });
 
-  it('does nothing for a path that is not an existing file', async () => {
+  it('rejects with a not-found error for a path that is not an existing file', async () => {
     const { app } = makeApp();
     const actions = new TaskActions(app as never, () => 'Google Tasks');
     await expect(actions.setCompleted('Google Tasks/missing.md', true)).rejects.toThrow(/not found/i);

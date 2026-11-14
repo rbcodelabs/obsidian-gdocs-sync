@@ -14,9 +14,7 @@ import {
 } from '../../src/tasks/TaskStore';
 
 /**
- * QA edge cases for the Tasks data layer. Tests prefixed "KNOWN BUG" assert the
- * CORRECT behaviour and currently FAIL against the source; they are left in
- * place on purpose so the defect cannot be forgotten (see QA report).
+ * QA edge cases for the Tasks data layer. Tests prefixed "FIXED" were KNOWN BUGs found by QA and are now fixed in the source.
  */
 
 const TODAY = '2026-11-13';
@@ -125,7 +123,7 @@ describe('subtask / parent relationships', () => {
     expect(tree.map((n) => n.task.path).sort()).toEqual(['Google Tasks/a.md', 'Google Tasks/b.md']);
   });
 
-  it('KNOWN BUG: a parent-id cycle (A<->B) must not make both tasks vanish', () => {
+  it('FIXED: a parent-id cycle (A<->B) must not make both tasks vanish', () => {
     // Reachable only by hand-editing gtasks_parent_id, but buildTree's own contract
     // says a subtask "never silently disappears".
     const a = item({ id: 'a', parentId: 'b' });
@@ -134,7 +132,7 @@ describe('subtask / parent relationships', () => {
     expect(visible.sort()).toEqual(['a', 'b']);
   });
 
-  it('KNOWN BUG: a third nesting level (grandchild) must not silently disappear', () => {
+  it('FIXED: a third nesting level (grandchild) must not silently disappear', () => {
     // Google only allows one level, but a hand-edited parent id produces this and
     // buildTree renders only roots and their direct children.
     const a = item({ id: 'a' });
@@ -144,7 +142,7 @@ describe('subtask / parent relationships', () => {
     expect(visible.sort()).toEqual(['a', 'b', 'c']);
   });
 
-  it('KNOWN BUG: an OPEN subtask of a COMPLETED parent must stay visible under the All tab', () => {
+  it('FIXED: an OPEN subtask of a COMPLETED parent must stay visible under the All tab', () => {
     // Today it is nested inside the (collapsed-by-default) Completed section, so the
     // view can claim "You're all caught up" while an open task exists.
     const parent = item({ id: 'p', completed: true, due: '2026-11-01' });
@@ -310,7 +308,7 @@ describe('dueLabel calendar edges', () => {
     expect(dueLabel('2026-11-15', TODAY)).not.toMatch(/Today|Tomorrow|Yesterday/);
   });
 
-  it('KNOWN BUG: a hand-edited, non-date due value must not render as "Invalid Date"', () => {
+  it('FIXED: a hand-edited, non-date due value must not render as "Invalid Date"', () => {
     // gtasks_due: tomorrow  (or "next friday", "TBD") flows straight to the chip text.
     for (const garbage of ['tomorrow', 'TBD', '2026-13-45', 'abc']) {
       expect(dueLabel(garbage, TODAY)).not.toMatch(/Invalid/i);

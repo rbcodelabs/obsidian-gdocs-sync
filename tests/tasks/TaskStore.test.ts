@@ -91,7 +91,7 @@ describe('readTasks', () => {
   it('normalises due values (ISO timestamp, Date object) to date-only', () => {
     const app = makeApp({
       'Google Tasks/A.md': { [FM.id]: 'a', [FM.title]: 'A', [FM.due]: '2026-11-20T00:00:00.000Z' },
-      'Google Tasks/B.md': { [FM.id]: 'b', [FM.title]: 'B', [FM.due]: new Date('2026-11-21T00:00:00.000Z') },
+      'Google Tasks/B.md': { [FM.id]: 'b', [FM.title]: 'B', [FM.due]: new Date(2026, 10, 21) },
     });
     expect(readTasks(app as never, 'Google Tasks').map((t) => t.due)).toEqual(['2026-11-20', '2026-11-21']);
   });
@@ -218,5 +218,39 @@ describe('dueLabel', () => {
   it('is DST-safe across a daylight-saving change', () => {
     expect(dueLabel('2026-03-09', '2026-03-08')).toBe('Tomorrow');
     expect(dueLabel('2026-11-02', '2026-11-01')).toBe('Tomorrow');
+  });
+});
+
+describe('review follow-ups', () => {
+  it('readTasks formats a Date due with LOCAL getters, not UTC', () => {
+    const app = makeApp({
+      'Google Tasks/A.md': { [FM.id]: 'a', [FM.title]: 'A', [FM.due]: new Date(2026, 10, 13, 23, 30) },
+    });
+    expect(readTasks(app as never, 'Google Tasks')[0].due).toBe('2026-11-13');
+  });
+
+  it('readTasks treats a malformed due as no date', () => {
+    const app = makeApp({
+      'Google Tasks/A.md': { [FM.id]: 'a', [FM.title]: 'A', [FM.due]: 'next friday' },
+      'Google Tasks/B.md': { [FM.id]: 'b', [FM.title]: 'B', [FM.due]: '2026-13-45' },
+    });
+    expect(readTasks(app as never, 'Google Tasks').map((t) => t.due)).toEqual(['', '']);
+  });
+
+  it('tab counts equal the top-level row counts of the sections (subtasks nest, not double count)', () => {
+    const tasks = [
+      item({ id: 'p', due: TODAY }),
+      item({ id: 'k1', parentId: 'p', due: TODAY }),
+      item({ id: 'k2', parentId: 'p', due: TODAY }),
+      item({ id: 'o', due: '2026-11-10' }),
+    ];
+    const rows = groupTasks(tasks, 'today', null, TODAY).reduce((n, g) => n + g.count, 0);
+    expect(countTasks(tasks, null, TODAY).today).toBe(rows);
+    expect(rows).toBe(2);
+  });
+
+  it('an open subtask of a completed parent counts as a row of its own', () => {
+    const tasks = [item({ id: 'p', completed: true }), item({ id: 'k', parentId: 'p', due: TODAY })];
+    expect(countTasks(tasks, null, TODAY).today).toBe(1);
   });
 });

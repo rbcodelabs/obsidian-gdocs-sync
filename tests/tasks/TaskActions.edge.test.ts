@@ -4,8 +4,7 @@ import { FM, disambiguateFilename } from '../../src/converter/TaskNoteMapper';
 import { TaskActions } from '../../src/tasks/TaskActions';
 
 /**
- * QA edge cases for the Tasks write layer. "KNOWN BUG" tests assert the correct
- * behaviour and currently FAIL against the source (reported in the QA report).
+ * QA edge cases for the Tasks write layer. Tests prefixed "FIXED" were KNOWN BUGs found by QA and are now fixed in the source.
  */
 
 function makeFile(path: string): TFile {
@@ -243,7 +242,7 @@ describe('write path failure modes', () => {
     expect(fm.get(PATH)![FM.title]).toBe('New');
   });
 
-  it('KNOWN BUG (hardening): setDue must reject a calendar-impossible date that passes the YYYY-MM-DD shape check', async () => {
+  it('FIXED: setDue must reject a calendar-impossible date that passes the YYYY-MM-DD shape check', async () => {
     // The UI uses <input type=date> so it cannot produce these, but the action layer
     // is the last line of defence before the value is pushed to Google.
     for (const bad of ['2026-13-45', '2026-02-30', '0000-00-00']) {
