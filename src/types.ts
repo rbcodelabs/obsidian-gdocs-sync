@@ -55,6 +55,8 @@ export interface SharedDrive {
   name: string;
 }
 
+export type TasksViewFilter = 'today' | 'upcoming' | 'overdue' | 'all';
+
 export interface GDocsPluginSettings {
   authProxyUrl: string;       // e.g. https://gdocs-sync.vercel.app
   syncTag: string;            // e.g. "gdocs-sync"
@@ -74,6 +76,7 @@ export interface GDocsPluginSettings {
   tasksFolder: string;           // vault folder for synced task notes, e.g. "Google Tasks"
   syncedTaskListIds: string[];   // Google Tasks list IDs to sync (empty = all lists)
   tasksPollIntervalSeconds: number; // how often to poll Google Tasks for remote changes
+  tasksViewDefaultFilter: TasksViewFilter; // tab the Tasks view opens on
 }
 
 export const DEFAULT_SETTINGS: GDocsPluginSettings = {
@@ -91,4 +94,5 @@ export const DEFAULT_SETTINGS: GDocsPluginSettings = {
   tasksFolder: 'Google Tasks',
   syncedTaskListIds: [],
   tasksPollIntervalSeconds: 60,
+  tasksViewDefaultFilter: 'today',
 };

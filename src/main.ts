@@ -1,4 +1,5 @@
 import { Plugin, Notice, TFile, parseYaml } from 'obsidian';
+import type { WorkspaceLeaf } from 'obsidian';
 import type { App, EventRef } from 'obsidian';
 import { GDocsPluginSettings, DEFAULT_SETTINGS } from './types';
 import { TokenStore } from './auth/TokenStore';
@@ -16,6 +17,7 @@ import { GDocsSettingTab, GDocsPluginInterface } from './settings';
 import { SyncStatusModal } from './ui/SyncStatusModal';
 import { registerManagedDrive } from './sync/registerManagedDrive';
 import { registerFileMenuActions } from './ui/FileMenu';
+import { TasksView, TASKS_VIEW_TYPE } from './ui/TasksView';
 import { pushNoteToGoogleDocs, pullNoteFromGoogleDocs } from './sync/SyncActions';
 
 /** Shown when the host could support full vault sync but the user has not opted in. */
@@ -278,6 +280,22 @@ export default class GDocsPlugin extends Plugin {
       },
     });
 
+    // ── Tasks view ──────────────────────────────────────────────────────────
+    this.registerView(TASKS_VIEW_TYPE, (leaf) => new TasksView(leaf, this));
+    this.addRibbonIcon('list-checks', 'Open Google Tasks', () => {
+      void this.activateTasksView();
+    });
+    this.addCommand({
+      id: 'open-tasks-view',
+      name: 'Open Google Tasks view',
+      callback: () => { void this.activateTasksView(); },
+    });
+    this.addCommand({
+      id: 'quick-add-task',
+      name: 'Quick add Google Task',
+      callback: () => { void this.activateTasksView(true); },
+    });
+
     // Sync Google Tasks now (incremental poll on demand)
     this.addCommand({
       id: 'sync-google-tasks-now',
@@ -385,6 +403,23 @@ export default class GDocsPlugin extends Plugin {
     this.tasksSyncEngine?.stop();
     this.fileCommandBar?.destroy();
     console.log('[GDocsPlugin] Unloaded');
+  }
+
+  /**
+   * Reveal the Tasks view in the right sidebar (reusing an existing leaf), and
+   * optionally focus its quick-add input.
+   */
+  async activateTasksView(focusQuickAdd = false): Promise<void> {
+    const { workspace } = this.app;
+    let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(TASKS_VIEW_TYPE)[0] ?? null;
+    if (!leaf) {
+      const right = workspace.getRightLeaf(false);
+      if (!right) return;
+      await right.setViewState({ type: TASKS_VIEW_TYPE, active: true });
+      leaf = right;
+    }
+    await workspace.revealLeaf(leaf);
+    if (focusQuickAdd && leaf.view instanceof TasksView) leaf.view.focusQuickAdd();
   }
 
   // ── Full vault sync (beta) ───────────────────────────────────────────────

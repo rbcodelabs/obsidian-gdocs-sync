@@ -285,6 +285,60 @@ describe('TasksSyncEngine — local → remote', () => {
     expect(parseFM(vault._files.get(path)!).fm[FM.id]).toBe('NEW');
   });
 
+  describe('creating from an unlinked note that names a list', () => {
+    const L2: GoogleTaskList = { id: 'L2', title: 'Home', updated: 't' };
+    const noteWithList = (listId: string) =>
+      `---\n${FM.listId}: "${listId}"\n${FM.listName}: "Home"\n${FM.title}: "Water plants"\n${FM.completed}: false\n---\n`;
+    const path = 'Google Tasks/Water plants.md';
+
+    it('inserts into the list named by gtasks_list_id when it is a synced list', async () => {
+      const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+      const { engine, api, vault } = makeEngine({
+        insertTask,
+        listTaskLists: vi.fn().mockResolvedValue([LIST, L2]),
+      });
+      vault._files.set(path, noteWithList('L2'));
+      await engine.syncLocalToRemote(makeTFile(path));
+      expect(api.insertTask.mock.calls[0][0]).toBe('L2');
+      expect(parseFM(vault._files.get(path)!).fm[FM.listName]).toBe('Home');
+    });
+
+    it('logs and falls back when listing task lists fails', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+      const listTaskLists = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue([LIST, L2]);
+      const { engine, api, vault } = makeEngine({ insertTask, listTaskLists });
+      vault._files.set(path, noteWithList('L2'));
+      await engine.syncLocalToRemote(makeTFile(path));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('TasksSyncEngine'), expect.anything());
+      expect(api.insertTask).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('falls back to the default list when the named list does not exist', async () => {
+      const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+      const { engine, api, vault } = makeEngine({
+        insertTask,
+        listTaskLists: vi.fn().mockResolvedValue([LIST, L2]),
+      });
+      vault._files.set(path, noteWithList('GONE'));
+      await engine.syncLocalToRemote(makeTFile(path));
+      expect(api.insertTask.mock.calls[0][0]).toBe('L1');
+    });
+
+    it('falls back to the default list when the named list is not one the user syncs', async () => {
+      const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+      const { engine, api, vault, plugin } = makeEngine({
+        insertTask,
+        listTaskLists: vi.fn().mockResolvedValue([LIST, L2]),
+      });
+      plugin.settings.syncedTaskListIds = ['L1'];
+      vault._files.set(path, noteWithList('L2'));
+      await engine.syncLocalToRemote(makeTFile(path));
+      expect(api.insertTask.mock.calls[0][0]).toBe('L1');
+    });
+  });
+
   it('patches the remote task when a linked note changes', async () => {
     const patchTask = vi.fn().mockResolvedValue(task({ status: 'completed', updated: '2026-08-02T14:00:00.000Z' }));
     const { engine, api, vault } = makeEngine({
@@ -426,5 +480,66 @@ describe('TasksSyncEngine — local delete → remote delete', () => {
 
     expect(api.deleteTask).not.toHaveBeenCalled();
     engine.stop();
+  });
+});
+
+// ─── QA: quick-add list placement edge cases ───────────────────────────────────
+
+describe('QA: quick-add list placement edge cases (createRemoteFromNote)', () => {
+  const L2: GoogleTaskList = { id: 'L2', title: 'Home', updated: 't' };
+  const path = 'Google Tasks/Water plants.md';
+  const note = (fmLines: string[]) =>
+    `---\n${fmLines.join('\n')}\n${FM.title}: "Water plants"\n${FM.completed}: false\n---\n`;
+
+  it('falls back to the default list when gtasks_list_id is an empty string', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+    const { engine, api, vault } = makeEngine({ insertTask, listTaskLists: vi.fn().mockResolvedValue([LIST, L2]) });
+    vault._files.set(path, note([`${FM.listId}: ""`, `${FM.listName}: ""`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(api.insertTask.mock.calls[0][0]).toBe('L1');
+  });
+
+  it('falls back to the default list when the named id is a non-string YAML value', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+    const { engine, api, vault } = makeEngine({ insertTask, listTaskLists: vi.fn().mockResolvedValue([LIST, L2]) });
+    vault._files.set(path, note([`${FM.listId}: 12345`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(api.insertTask.mock.calls[0][0]).toBe('L1');
+  });
+
+  it('corrects a stale gtasks_list_name after the list was renamed in Google', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+    const { engine, vault } = makeEngine({ insertTask, listTaskLists: vi.fn().mockResolvedValue([LIST, L2]) });
+    vault._files.set(path, note([`${FM.listId}: "L2"`, `${FM.listName}: "Old name"`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(parseFM(vault._files.get(path)!).fm[FM.listName]).toBe('Home');
+  });
+
+  it('creates nothing and reports an error when every list lookup fails (list deleted + API down)', async () => {
+    const insertTask = vi.fn();
+    const { engine, api, vault } = makeEngine({ insertTask, listTaskLists: vi.fn().mockRejectedValue(new Error('503')) });
+    vault._files.set(path, note([`${FM.listId}: "L2"`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(api.insertTask).not.toHaveBeenCalled();
+    expect(parseFM(vault._files.get(path)!).fm[FM.id]).toBeUndefined();
+  });
+
+  it('still honours an explicit sync-list selection when the named list is the only chosen one', async () => {
+    const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+    const { engine, api, vault, plugin } = makeEngine({ insertTask, listTaskLists: vi.fn().mockResolvedValue([LIST, L2]) });
+    plugin.settings.syncedTaskListIds = ['L2'];
+    vault._files.set(path, note([`${FM.listId}: "L2"`, `${FM.listName}: "Home"`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(api.insertTask.mock.calls[0][0]).toBe('L2');
+  });
+
+  it('creates exactly one remote task for a quick-add note even if the watcher fires twice', async () => {
+    let n = 0;
+    const insertTask = vi.fn().mockImplementation(async () => task({ id: `NEW${++n}` }));
+    const { engine, api, vault } = makeEngine({ insertTask, listTaskLists: vi.fn().mockResolvedValue([LIST, L2]) });
+    vault._files.set(path, note([`${FM.listId}: "L2"`, `${FM.listName}: "Home"`]));
+    await engine.syncLocalToRemote(makeTFile(path));
+    await engine.syncLocalToRemote(makeTFile(path));
+    expect(api.insertTask).toHaveBeenCalledTimes(1);
   });
 });

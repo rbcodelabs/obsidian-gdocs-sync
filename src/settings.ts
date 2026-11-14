@@ -8,7 +8,7 @@ import {
   ToggleComponent,
   Notice,
 } from 'obsidian';
-import { GDocsPluginSettings, FolderMapping } from './types';
+import { GDocsPluginSettings, FolderMapping, TasksViewFilter } from './types';
 import { GoogleAuth } from './auth/GoogleAuth';
 import { GoogleConnectionApi } from './auth/GoogleConnectionApi';
 import { GoogleDocsAPI } from './api/GoogleDocsAPI';
@@ -306,6 +306,22 @@ export class GDocsSettingTab extends PluginSettingTab {
             .setValue(String(this.pluginInstance.settings.tasksPollIntervalSeconds))
             .onChange(async (value) => {
               this.pluginInstance.settings.tasksPollIntervalSeconds = parseInt(value, 10);
+              await this.pluginInstance.saveSettings();
+            });
+        });
+
+      new Setting(containerEl)
+        .setName('Tasks view default tab')
+        .setDesc('Which tab the Tasks view opens on.')
+        .addDropdown((dropdown) => {
+          dropdown
+            .addOption('today', 'Today')
+            .addOption('upcoming', 'Upcoming')
+            .addOption('overdue', 'Overdue')
+            .addOption('all', 'All')
+            .setValue(this.pluginInstance.settings.tasksViewDefaultFilter)
+            .onChange(async (value) => {
+              this.pluginInstance.settings.tasksViewDefaultFilter = value as TasksViewFilter;
               await this.pluginInstance.saveSettings();
             });
         });

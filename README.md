@@ -27,6 +27,7 @@ Bi-directional sync between Obsidian notes and Google Docs. Tag a note or drop i
 - **Shared Drive support** — browse Google Workspace Shared Drives alongside My Drive, or paste a Shared Drive folder URL to import and sync its accessible Google Docs. Folder traversal uses the Shared Drive's full search scope and follows all result pages, including nested folders.
 - **Automatic new-doc detection** — mapped Drive folders are polled every 5 minutes; new Docs added by anyone are imported automatically
 - **Per-file command bar** — a slim bar appears between the header and editor for any synced note, showing sync status (✓ clean / ● local edits / ↻ syncing / ✕ error), last-sync time, and one-click Push / Pull / Open-in-GDocs buttons
+- **Tasks view** — a focused hub over your synced Google Tasks (see [Tasks view](#tasks-view))
 - **Frontmatter metadata** — each synced note stores its doc ID, URL, and last-sync hash
 - **Conflict resolution** — last-write-wins (v1); full diff/merge UI planned for v2
 - **Geode secure credentials** — migrates existing OAuth tokens into Geode's encrypted secret store; ordinary Obsidian retains its existing settings-backed authentication
@@ -111,6 +112,28 @@ OAuth credentials are stored through Geode's native encrypted secret store. Lega
 Disconnect invalidates outstanding sign-in callbacks and orders credential cleanup after earlier authentication settings writes, preventing a delayed callback or save from restoring the disconnected account.
 
 On ordinary Obsidian, credentials continue to load, refresh, and save through the existing plugin settings, and the full-vault toggle is hard-blocked — that host provides none of the plugin-owned sync registration, device state, or secret storage the transport requires. The beta scope is compatibility testing of Google Docs/Tasks authentication, including refresh and reconnect, and secure credential migration on Geode.
+
+### Tasks view
+
+A sidebar/tab view for working with Google Tasks that Tasks sync has already mirrored into your vault. It needs **Enable Tasks sync** (Settings → Google Tasks Sync) and a connected Google account; otherwise it shows a "sync is off" or "not connected" state with an **Open settings** button.
+
+**Opening it**
+
+- Ribbon icon (checklist), or the command palette: **Open Google Tasks view** (`open-tasks-view`) opens it in the right sidebar; drag it to a tab for the wide layout (one line per task).
+- **Quick add Google Task** (`quick-add-task`) opens the view and focuses the quick-add box.
+- Setting **Tasks view default tab** (`tasksViewDefaultFilter`: Today, Upcoming, Overdue or All; default Today).
+
+**What you see.** Tabs for Today (overdue plus due today), Upcoming, Overdue and All, with a list filter, collapsible Overdue / Today / Upcoming / No date / Completed sections, nested subtasks, a due chip and a list dot per task. Tab counts are the number of top-level rows (subtasks nest under their parent and are not counted separately). An open subtask whose parent is completed is shown on its own so it is never hidden. A non-date `gtasks_due` value is treated as "no date". Dates are compared by local calendar day and the view re-buckets itself when local midnight passes.
+
+**What writes to your notes.** The view only edits frontmatter in the task notes, via Obsidian's frontmatter API: the checkbox sets `gtasks_completed`, the due chip or edit button sets or clears `gtasks_due`, and editing the title sets `gtasks_title`. Nothing talks to Google directly from an edit; the existing Tasks sync pushes the change roughly 2 seconds after the note is written. The "Sync now" button runs a poll (pull and push) immediately. Clicking a title opens the note (Cmd/Ctrl-click for a new tab).
+
+**Quick add.** Type a title, pick a list, press Enter. This creates a note in your Tasks folder with `gtasks_list_id`, `gtasks_list_name`, `gtasks_title` and `gtasks_completed: false`, then asks Tasks sync to create the Google task straight away, in the list you picked if it is one of your synced lists (otherwise your first synced list). The due date depends on the tab: Today sets today, Upcoming sets tomorrow, and Overdue or All sets no date and shows a notice ("Added to <list> (no due date)") because the task will not appear on that tab. Subtasks cannot be created from the view.
+
+**Latency and limits.** Remote changes appear after the next poll (default every 60 seconds; changing the interval needs a plugin reload) or **Sync now**. If a task note is open in an editor with unsaved edits, the view saves that editor first and cancels the write if the save fails; there remains a small window between that save and the frontmatter write in which a keystroke could be lost, and we have not verified whether Geode's frontmatter API already merges with open editor buffers.
+
+**Hosts.** The view uses only standard Obsidian view APIs, so it works the same on Obsidian and Geode. It has not yet been verified against a live Geode or Obsidian host with a real Google account (see Testing).
+
+---
 
 ### Shared Drives
 
