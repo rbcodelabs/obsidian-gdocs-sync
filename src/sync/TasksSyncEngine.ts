@@ -470,7 +470,7 @@ export class TasksSyncEngine {
 
     // New note the user authored in the tasks folder — create a real task.
     if (link.state === 'unlinked') {
-      await this.createRemoteFromNote(file, localFields);
+      await this.createRemoteFromNote(file, localFields, fm);
       return;
     }
 
@@ -497,8 +497,14 @@ export class TasksSyncEngine {
     }
   }
 
-  private async createRemoteFromNote(file: TFile, localFields: TaskFields): Promise<void> {
-    const targetListId = await this.defaultListId();
+  private async createRemoteFromNote(
+    file: TFile,
+    localFields: TaskFields,
+    frontmatter: TaskFrontmatter = {},
+  ): Promise<void> {
+    // Honour a list the note already names (e.g. chosen in the Tasks view's
+    // quick-add) when it is one we sync; otherwise use the default list.
+    const targetListId = (await this.namedSyncedListId(frontmatter)) ?? (await this.defaultListId());
     if (!targetListId) {
       this.reportError('Create task from note', new Error('No synced task list available to create the task in.'));
       return;
@@ -525,6 +531,17 @@ export class TasksSyncEngine {
       new Notice(`Google Tasks: created "${fields.title}".`);
     } catch (err) {
       this.reportError(`Create task "${fields.title}" failed`, err);
+    }
+  }
+
+  private async namedSyncedListId(frontmatter: TaskFrontmatter): Promise<string | undefined> {
+    const named = asNonEmptyString(frontmatter[FM.listId]);
+    if (!named) return undefined;
+    try {
+      const lists = this.selectSyncedLists(await this.api.listTaskLists());
+      return lists.some((l) => l.id === named) ? named : undefined;
+    } catch {
+      return undefined;
     }
   }
 

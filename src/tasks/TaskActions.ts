@@ -54,8 +54,6 @@ export class TaskActions {
   /**
    * Create a new task note. The sync engine sees a note with no `gtasks_id`
    * and inserts it into Google on the next poll or debounced modify.
-   * NOTE: the engine currently creates such tasks in the first synced list, so
-   * `listId` is carried as frontmatter but is not guaranteed to be honoured.
    */
   async quickAdd(input: QuickAddInput): Promise<string> {
     const title = input.title.trim();
