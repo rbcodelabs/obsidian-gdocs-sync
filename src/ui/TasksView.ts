@@ -208,7 +208,7 @@ export class TasksView extends ItemView {
     this.addInput.setPlaceholder('Add a task…');
 
     const btn = form.createEl('button', {
-      cls: 'gtasks-view-icon-btn gtasks-view-add-btn mod-cta',
+      cls: 'gtasks-view-icon-btn gtasks-view-add-btn',
       attr: { type: 'submit', 'aria-label': 'Add task', title: 'Add task' },
     });
     setIcon(btn, 'plus');

@@ -515,7 +515,7 @@
 .gtasks-view-add-list { flex: none; width: 76px; min-width: 0; }
 .gtasks-view.is-wide .gtasks-view-add-list { width: 120px; }
 .gtasks-view-add-list select { width: 100%; font-size: var(--font-ui-small); color: var(--text-muted); text-overflow: ellipsis; }
-.gtasks-view-add-btn { background: var(--interactive-accent); color: var(--text-on-accent); }
+.gtasks-view-add-btn { width: 28px; height: 28px; padding: 0; background: var(--interactive-accent); color: var(--text-on-accent); }
 .gtasks-view-add-btn:hover:not(:disabled) { background: var(--interactive-accent-hover, var(--interactive-accent)); color: var(--text-on-accent); }
 
 /* empty / off states */
