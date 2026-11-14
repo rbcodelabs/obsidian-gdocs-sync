@@ -540,7 +540,9 @@ export class TasksSyncEngine {
     try {
       const lists = this.selectSyncedLists(await this.api.listTaskLists());
       return lists.some((l) => l.id === named) ? named : undefined;
-    } catch {
+    } catch (err) {
+      // Not fatal: fall back to the default list, but leave a trace of why.
+      console.warn('[TasksSyncEngine] Could not list task lists to honour the note\'s list; using the default list.', err);
       return undefined;
     }
   }

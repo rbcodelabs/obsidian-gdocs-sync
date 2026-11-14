@@ -399,7 +399,6 @@ export default class GDocsPlugin extends Plugin {
 
   onunload(): void {
     this.unloaded = true;
-    this.app.workspace.detachLeavesOfType(TASKS_VIEW_TYPE);
     this.syncEngine?.stop();
     this.tasksSyncEngine?.stop();
     this.fileCommandBar?.destroy();

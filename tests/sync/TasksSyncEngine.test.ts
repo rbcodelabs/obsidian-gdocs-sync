@@ -303,6 +303,18 @@ describe('TasksSyncEngine — local → remote', () => {
       expect(parseFM(vault._files.get(path)!).fm[FM.listName]).toBe('Home');
     });
 
+    it('logs and falls back when listing task lists fails', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
+      const listTaskLists = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue([LIST, L2]);
+      const { engine, api, vault } = makeEngine({ insertTask, listTaskLists });
+      vault._files.set(path, noteWithList('L2'));
+      await engine.syncLocalToRemote(makeTFile(path));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('TasksSyncEngine'), expect.anything());
+      expect(api.insertTask).toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
     it('falls back to the default list when the named list does not exist', async () => {
       const insertTask = vi.fn().mockResolvedValue(task({ id: 'NEW' }));
       const { engine, api, vault } = makeEngine({
