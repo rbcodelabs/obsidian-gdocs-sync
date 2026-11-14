@@ -6,8 +6,7 @@ import { localDateString } from '../../src/tasks/TaskStore';
 import { DEFAULT_SETTINGS } from '../../src/types';
 
 /**
- * QA edge cases for the Tasks view. "KNOWN BUG" tests assert the correct
- * behaviour and currently FAIL against the source (see QA report).
+ * QA edge cases for the Tasks view. Tests prefixed "FIXED" were KNOWN BUGs found by QA and are now fixed in the source.
  */
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
@@ -220,8 +219,17 @@ describe('quick-add edge cases', () => {
     expect(app.vault.create).toHaveBeenCalledTimes(2);
   });
 
-  it('creates the note without a due date on the Upcoming/Overdue/All tabs (only Today stamps today)', async () => {
-    for (const filter of ['upcoming', 'overdue', 'all']) {
+  it('creates the note with tomorrow on Upcoming, and with no due date on Overdue/All', async () => {
+    // Updated for review item 5: Upcoming now defaults to tomorrow so the task stays visible.
+    {
+      const { view, createdContent } = setup({ filter: 'upcoming', notes: { 'Google Tasks/a.md': task('a', 'A') } });
+      await view.onOpen();
+      typeAdd('New on upcoming');
+      submitAdd();
+      await settle();
+      expect([...createdContent.values()][0]).toContain(`${FM.due}: "${dayOffset(1)}"`);
+    }
+    for (const filter of ['overdue', 'all']) {
       const { view, createdContent } = setup({ filter, notes: { 'Google Tasks/a.md': task('a', 'A') } });
       await view.onOpen();
       typeAdd(`New on ${filter}`);
@@ -262,7 +270,7 @@ describe('quick-add edge cases', () => {
     expect(content).not.toContain(FM.listId);
   });
 
-  it('KNOWN BUG: a double submit (Enter pressed twice before the first write finishes) must create only one task', async () => {
+  it('FIXED: a double submit (Enter pressed twice before the first write finishes) must create only one task', async () => {
     const { view, app } = setup({ slowCreate: true, notes: { 'Google Tasks/a.md': task('a', 'A') } });
     await view.onOpen();
     typeAdd('Pay rent');
@@ -378,7 +386,7 @@ describe('view closed while work is pending', () => {
     vi.unstubAllGlobals();
   });
 
-  it('KNOWN BUG (low): a sync that finishes after the view was closed must not schedule a re-render', async () => {
+  it('FIXED: a sync that finishes after the view was closed must not schedule a re-render', async () => {
     const { view, plugin, getMarkdownFiles } = setup({ notes: { 'Google Tasks/a.md': task('a', 'A') } });
     let release!: () => void;
     plugin.tasksSyncEngine.poll.mockReturnValue(new Promise<void>((r) => { release = r; }));
@@ -400,7 +408,7 @@ describe('midnight rollover with the view left open', () => {
     return ticks;
   }
 
-  it('KNOWN BUG: a task due "tomorrow" must move to Today after local midnight without user interaction', async () => {
+  it('FIXED: a task due "tomorrow" must move to Today after local midnight without user interaction', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(2026, 10, 13, 23, 59, 40));
     const ticks = captureTicks();
@@ -413,7 +421,7 @@ describe('midnight rollover with the view left open', () => {
     expect(titles()).toEqual(['Due at midnight']);
   });
 
-  it('KNOWN BUG: a task due today must become Overdue after local midnight without user interaction', async () => {
+  it('FIXED: a task due today must become Overdue after local midnight without user interaction', async () => {
     vi.useFakeTimers({ toFake: ['Date'] });
     vi.setSystemTime(new Date(2026, 10, 13, 23, 59, 40));
     const ticks = captureTicks();

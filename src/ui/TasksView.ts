@@ -36,7 +36,7 @@ export interface TasksViewPlugin {
   manifest: { id: string };
   settings: GDocsPluginSettings;
   tokenStore: { get(): unknown };
-  tasksSyncEngine: { poll(): Promise<void> };
+  tasksSyncEngine: { poll(): Promise<void>; syncLocalToRemote(file: TFile): Promise<void> };
 }
 
 type SettingsHost = { open(): void; openTabById(id: string): void };
@@ -61,6 +61,13 @@ export class TasksView extends ItemView {
   private editingPath: string | null = null;
   private refreshPending = false;
   private refreshTimer: ReturnType<typeof setTimeout> | null = null;
+  private tickHandle: number | null = null;
+  /** Local date the rows were last bucketed for; a change means midnight passed. */
+  private renderedDate = '';
+  /** Set on close so late async work (sync, quick-add, focusout) schedules nothing. */
+  private closed = true;
+  private adding = false;
+  private listsKey: string | null = null;
   private lastSyncedAt: number | null = null;
   private syncing = false;
   private actions: TaskActions;
@@ -69,6 +76,7 @@ export class TasksView extends ItemView {
   private rootEl!: HTMLElement;
   private headerEl!: HTMLElement;
   private syncLabelEl!: HTMLElement;
+  private statusEl!: HTMLElement;
   private syncBtnEl!: HTMLButtonElement;
   private listDropdown!: DropdownComponent;
   private tabsEl!: HTMLElement;
@@ -91,6 +99,7 @@ export class TasksView extends ItemView {
   // ─── lifecycle ─────────────────────────────────────────────────────────────
 
   async onOpen(): Promise<void> {
+    this.closed = false;
     const root = this.contentEl;
     root.empty();
     root.addClass('gtasks-view');
@@ -103,12 +112,16 @@ export class TasksView extends ItemView {
     this.registerEvents();
     this.observeWidth();
     // Keep "Synced N min ago" fresh without re-rendering rows.
-    this.registerInterval(window.setInterval(() => this.renderSyncLabel(), 30_000));
+    this.tickHandle = window.setInterval(() => this.onTick(), 30_000);
+    this.registerInterval(this.tickHandle);
 
     this.render();
   }
 
   async onClose(): Promise<void> {
+    this.closed = true;
+    if (this.tickHandle !== null) window.clearInterval(this.tickHandle);
+    this.tickHandle = null;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = null;
     this.resizeObserver?.disconnect();
@@ -149,7 +162,18 @@ export class TasksView extends ItemView {
     }));
   }
 
+  /** 30 s tick: age the sync label, and re-bucket when the local date rolled over. */
+  private onTick(): void {
+    if (this.closed) return;
+    this.renderSyncLabel();
+    if (localDateString() === this.renderedDate) return;
+    // Re-render now (not debounced) so Today/Overdue are right the moment midnight passes.
+    if (this.editingPath !== null) this.refreshPending = true;
+    else this.render();
+  }
+
   private scheduleRefresh(): void {
+    if (this.closed) return;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
@@ -177,7 +201,10 @@ export class TasksView extends ItemView {
     titleRow.createEl('h4', { cls: 'gtasks-view-title', text: 'Tasks' });
 
     const sync = titleRow.createDiv({ cls: 'gtasks-view-sync' });
-    this.syncLabelEl = sync.createSpan({ cls: 'gtasks-view-sync-label', attr: { 'aria-live': 'polite' } });
+    this.syncLabelEl = sync.createSpan({ cls: 'gtasks-view-sync-label' });
+    // The visible label ticks every 30 s, so it must not be a live region; this
+    // visually hidden node announces only real state changes.
+    this.statusEl = sync.createSpan({ cls: 'gtasks-view-sr-only', attr: { role: 'status' } });
     this.syncBtnEl = sync.createEl('button', {
       cls: 'gtasks-view-icon-btn clickable-icon',
       attr: { 'aria-label': 'Sync now', title: 'Sync now', type: 'button' },
@@ -192,7 +219,12 @@ export class TasksView extends ItemView {
     const listWrap = controls.createDiv({ cls: 'gtasks-view-list-select' });
     this.listDropdown = new DropdownComponent(listWrap);
     this.listDropdown.selectEl.setAttribute('aria-label', 'List');
-    this.listDropdown.onChange((v) => { this.listId = v; this.render(); });
+    this.listDropdown.onChange((v) => {
+      this.listId = v;
+      // Filtering to a list also points quick-add at it (the user can still override).
+      if (v !== ALL_LISTS) this.quickAddListId = v;
+      this.render();
+    });
   }
 
   private buildQuickAdd(root: HTMLElement): void {
@@ -226,6 +258,7 @@ export class TasksView extends ItemView {
     const lists = listsOf(tasks);
     if (this.listId !== ALL_LISTS && !lists.some((l) => l.id === this.listId)) this.listId = ALL_LISTS;
     const today = localDateString();
+    this.renderedDate = today;
     const listFilter = this.listId === ALL_LISTS ? null : this.listId;
 
     this.renderSyncLabel();
@@ -243,22 +276,22 @@ export class TasksView extends ItemView {
   }
 
   private renderListControls(lists: Array<{ id: string; name: string }>): void {
-    const sel = this.listDropdown.selectEl;
-    sel.empty();
-    this.listDropdown.addOption(ALL_LISTS, 'All lists');
-    for (const l of lists) this.listDropdown.addOption(l.id, l.name);
+    // Rebuild the <option>s only when the set of lists changed, so an open
+    // dropdown and the user's quick-add choice survive routine refreshes.
+    const key = lists.map((l) => `${l.id}:${l.name}`).join('|');
+    if (key !== this.listsKey) {
+      this.listsKey = key;
+      this.listDropdown.selectEl.empty();
+      this.listDropdown.addOption(ALL_LISTS, 'All lists');
+      for (const l of lists) this.listDropdown.addOption(l.id, l.name);
+      this.addList.selectEl.empty();
+      if (lists.length === 0) this.addList.addOption(NO_LIST, 'Default list');
+      for (const l of lists) this.addList.addOption(l.id, l.name);
+    }
     this.listDropdown.setValue(this.listId);
-
-    const add = this.addList.selectEl;
-    add.empty();
-    if (lists.length === 0) this.addList.addOption(NO_LIST, 'Default list');
-    for (const l of lists) this.addList.addOption(l.id, l.name);
-    const preferred =
-      this.listId !== ALL_LISTS ? this.listId : this.quickAddListId && lists.some((l) => l.id === this.quickAddListId)
-        ? this.quickAddListId
-        : lists[0]?.id ?? NO_LIST;
-    this.addList.setValue(preferred);
-    this.quickAddListId = preferred;
+    const valid = this.quickAddListId !== null && lists.some((l) => l.id === this.quickAddListId);
+    this.quickAddListId = valid ? this.quickAddListId : (lists[0]?.id ?? NO_LIST);
+    this.addList.setValue(this.quickAddListId as string);
     this.addInput.setPlaceholder(this.filter === 'today' ? 'Add a task for today…' : 'Add a task…');
   }
 
@@ -293,11 +326,15 @@ export class TasksView extends ItemView {
   }
 
   private onTabKey(e: KeyboardEvent): void {
-    const dir = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
-    if (!dir) return;
-    e.preventDefault();
     const idx = FILTERS.findIndex((f) => f.id === this.filter);
-    const next = FILTERS[(idx + dir + FILTERS.length) % FILTERS.length];
+    let nextIdx: number;
+    if (e.key === 'ArrowRight') nextIdx = (idx + 1) % FILTERS.length;
+    else if (e.key === 'ArrowLeft') nextIdx = (idx - 1 + FILTERS.length) % FILTERS.length;
+    else if (e.key === 'Home') nextIdx = 0;
+    else if (e.key === 'End') nextIdx = FILTERS.length - 1;
+    else return;
+    e.preventDefault();
+    const next = FILTERS[nextIdx];
     this.setFilter(next.id);
     this.tabsEl.querySelector<HTMLElement>(`[data-filter="${next.id}"]`)?.focus();
   }
@@ -392,7 +429,8 @@ export class TasksView extends ItemView {
         type: 'button',
         role: 'checkbox',
         'aria-checked': String(task.completed),
-        'aria-label': `${task.completed ? 'Mark incomplete' : 'Complete'}: ${task.title}`,
+        // Static name; aria-checked carries the state.
+        'aria-label': task.title,
       },
     });
     setIcon(check, 'check');
@@ -404,15 +442,20 @@ export class TasksView extends ItemView {
       return;
     }
 
-    const title = main.createEl('span', {
+    const title = main.createEl('button', {
       cls: 'gtasks-view-task-title',
       text: task.title,
-      attr: { tabindex: '0', role: 'link', 'aria-label': `Open note: ${task.title}` },
+      attr: { type: 'button', 'aria-label': `Open note: ${task.title}` },
     });
+    // A real button: Space and Enter activate it natively (click).
     title.addEventListener('click', (e) => this.openNote(task, e.metaKey || e.ctrlKey));
     title.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') this.openNote(task, e.metaKey || e.ctrlKey);
-      else if (e.key === 'F2') this.startEdit(task);
+      if (e.key === 'Enter') {
+        // Handle Enter ourselves so a modifier can open a new tab, and stop the
+        // browser's synthesized click from opening the note a second time.
+        e.preventDefault();
+        this.openNote(task, e.metaKey || e.ctrlKey);
+      } else if (e.key === 'F2') this.startEdit(task);
     });
 
     const meta = main.createDiv({ cls: 'gtasks-view-meta' });
@@ -493,7 +536,7 @@ export class TasksView extends ItemView {
     date.addEventListener('change', () => void finish(true));
     // Save when focus leaves the whole row (tabbing title -> date must not save early).
     row.addEventListener('focusout', () => {
-      setTimeout(() => { if (!row.contains(document.activeElement)) void finish(true); }, 0);
+      setTimeout(() => { if (!this.closed && !row.contains(document.activeElement)) void finish(true); }, 0);
     });
   }
 
@@ -518,39 +561,74 @@ export class TasksView extends ItemView {
     void this.app.workspace.getLeaf(newTab ? 'tab' : false).openFile(file);
   }
 
+  /**
+   * Due date given to a quick-added task, per tab, so it lands where the user is
+   * looking: Today -> today, Upcoming -> tomorrow. Overdue and All get no date
+   * (an overdue date would be wrong and "All" has none to imply); the user is
+   * told via a notice since the task will not appear on the current tab.
+   */
+  private quickAddDue(): string | undefined {
+    if (this.filter === 'today') return localDateString();
+    if (this.filter === 'upcoming') {
+      const d = new Date();
+      d.setDate(d.getDate() + 1);
+      return localDateString(d);
+    }
+    return undefined;
+  }
+
   private async submitQuickAdd(): Promise<void> {
+    // In-flight guard: a second Enter before the first write finishes must not
+    // create a duplicate note (and a duplicate Google task).
+    if (this.adding || this.closed) return;
     const title = this.addInput.inputEl.value.trim();
     if (!title) return;
+    this.adding = true;
     const lists = listsOf(this.tasks());
-    const listId = this.addList.getValue();
-    const list = lists.find((l) => l.id === listId);
+    const list = lists.find((l) => l.id === this.addList.getValue());
+    const due = this.quickAddDue();
     try {
-      await this.actions.quickAdd({
-        title,
-        listId: list?.id ?? NO_LIST,
-        listName: list?.name ?? '',
-        due: this.filter === 'today' ? localDateString() : undefined,
-      });
+      const path = await this.actions.quickAdd({ title, listId: list?.id ?? NO_LIST, listName: list?.name ?? '', due });
       this.addInput.setValue('');
+      if (!due) new Notice(`Added to ${list?.name ?? 'your default list'} (no due date)`);
+      this.pushNewNote(path);
       this.scheduleRefresh();
     } catch (err) {
       new Notice(`Google Tasks: ${(err as Error).message}`);
+    } finally {
+      this.adding = false;
     }
+  }
+
+  /** Send a just-created note to Google now; FileWatcher only reacts to `modify`, not `create`. */
+  private pushNewNote(path: string): void {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    if (!(file instanceof TFile)) return;
+    // Best effort: the poller's pushNewLocalNotes still picks it up if this fails.
+    Promise.resolve(this.plugin.tasksSyncEngine.syncLocalToRemote(file)).catch((err) => {
+      console.warn('[TasksView] Immediate push of new task failed; the next poll will retry.', err);
+    });
   }
 
   private async syncNow(): Promise<void> {
     if (this.syncing || !this.enabled) return;
     this.syncing = true;
+    this.statusEl.setText('Syncing tasks');
     this.renderSyncLabel();
+    let ok = false;
     try {
       await this.plugin.tasksSyncEngine.poll();
       this.lastSyncedAt = Date.now();
+      ok = true;
     } catch (err) {
       new Notice(`Google Tasks sync failed: ${(err as Error).message}`);
     } finally {
       this.syncing = false;
-      this.renderSyncLabel();
-      this.scheduleRefresh();
+      if (!this.closed) {
+        this.statusEl.setText(ok ? 'Tasks synced' : 'Tasks sync failed');
+        this.renderSyncLabel();
+        this.scheduleRefresh();
+      }
     }
   }
 

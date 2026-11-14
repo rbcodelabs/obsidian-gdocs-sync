@@ -55,12 +55,12 @@ describe('activateTasksView', () => {
 });
 
 describe('onunload', () => {
-  it('detaches Tasks view leaves so a disabled plugin leaves no dead pane behind', () => {
+  it('does not detach Tasks view leaves on unload (Obsidian restores their layout position)', () => {
     const ws = { detachLeavesOfType: vi.fn() };
     const plugin = fakePlugin(ws);
     Object.assign(plugin, { syncEngine: { stop: vi.fn() }, tasksSyncEngine: { stop: vi.fn() }, fileCommandBar: { destroy: vi.fn() } });
     plugin.onunload();
-    expect(ws.detachLeavesOfType).toHaveBeenCalledWith(TASKS_VIEW_TYPE);
+    expect(ws.detachLeavesOfType).not.toHaveBeenCalled();
   });
 
   it('survives being unloaded before the engines were created (early-unload)', () => {

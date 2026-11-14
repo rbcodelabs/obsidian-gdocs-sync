@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { TFile, Notice } from 'obsidian';
+import { TFile, Notice, noticeLog } from 'obsidian';
 import { FM } from '../../src/converter/TaskNoteMapper';
 import { TasksView, TASKS_VIEW_TYPE } from '../../src/ui/TasksView';
 import { localDateString } from '../../src/tasks/TaskStore';
@@ -31,9 +31,10 @@ function setup(opts: { enabled?: boolean; connected?: boolean; notes?: Record<st
     return { event };
   };
   const openFile = vi.fn();
+  const getMarkdownFiles = vi.fn(() => [...notes.keys()].map(makeFile));
   const app = {
     vault: {
-      getMarkdownFiles: () => [...notes.keys()].map(makeFile),
+      getMarkdownFiles: getMarkdownFiles,
       getAbstractFileByPath: (p: string) => (notes.has(p) ? makeFile(p) : null),
       getFolderByPath: () => ({}),
       createFolder: vi.fn(),
@@ -62,12 +63,12 @@ function setup(opts: { enabled?: boolean; connected?: boolean; notes?: Record<st
       tasksViewDefaultFilter: opts.filter ?? 'today',
     },
     tokenStore: { get: () => (opts.connected === false ? null : { accessToken: 'x' }) },
-    tasksSyncEngine: { poll: vi.fn().mockResolvedValue(undefined) },
+    tasksSyncEngine: { poll: vi.fn().mockResolvedValue(undefined), syncLocalToRemote: vi.fn().mockResolvedValue(undefined) },
   };
   const leaf = { app } as never;
   const view = new TasksView(leaf, plugin as never);
   document.body.replaceChildren(view.contentEl);
-  return { view, plugin, app, notes, handlers, openFile };
+  return { view, plugin, app, notes, handlers, openFile, getMarkdownFiles };
 }
 
 const task = (id: string, title: string, over: FM_ = {}): FM_ => ({
@@ -324,5 +325,133 @@ describe('TasksView refresh', () => {
     q<HTMLInputElement>('.gtasks-view-title-input')!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
     await settle();
     expect(titles().sort()).toEqual(['Alpha', 'Bravo']);
+  });
+});
+
+describe('review follow-ups: quick add', () => {
+  const base = () => ({ 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) });
+  const add = async (title: string) => {
+    q<HTMLInputElement>('.gtasks-view-add-input')!.value = title;
+    q<HTMLFormElement>('.gtasks-view-add')!.dispatchEvent(new Event('submit', { cancelable: true }));
+    await settle(); await settle();
+  };
+  const tab = (f: string) => q(`[data-filter="${f}"]`)!.click();
+
+  it('pushes the new note to Google straight away instead of waiting for the poller', async () => {
+    const { view, plugin } = setup({ notes: base() });
+    await view.onOpen();
+    await add('Buy milk');
+    expect(plugin.tasksSyncEngine.syncLocalToRemote).toHaveBeenCalledTimes(1);
+    expect((plugin.tasksSyncEngine.syncLocalToRemote.mock.calls[0][0] as TFile).path).toBe('Google Tasks/Buy milk.md');
+  });
+
+  it('defaults the due date to tomorrow on Upcoming', async () => {
+    const { view, app } = setup({ notes: base() });
+    await view.onOpen();
+    tab('upcoming');
+    await add('Later');
+    const content = (app.vault.create.mock.calls[0] as unknown as [string, string])[1];
+    expect(content).toContain(`${FM.due}: "${dayOffset(1)}"`);
+  });
+
+  it('on Overdue and All adds with no date and says so in a notice naming the list', async () => {
+    for (const f of ['overdue', 'all']) {
+      noticeLog.length = 0;
+      const { view, app } = setup({ notes: base() });
+      await view.onOpen();
+      tab(f);
+      await add('Whenever');
+      const content = (app.vault.create.mock.calls[0] as unknown as [string, string])[1];
+      expect(content).not.toContain(FM.due);
+      expect(noticeLog.at(-1)).toBe('Added to Work (no due date)');
+    }
+  });
+
+  it('shows no notice when the new task lands on the current tab', async () => {
+    noticeLog.length = 0;
+    const { view } = setup({ notes: base() });
+    await view.onOpen();
+    await add('Today thing');
+    expect(noticeLog).toEqual([]);
+  });
+
+  it('keeps the chosen quick-add list across a re-render when it is still valid', async () => {
+    const { view, handlers } = setup({
+      notes: {
+        'Google Tasks/a.md': task('a', 'A', { [FM.due]: dayOffset(0) }),
+        'Google Tasks/b.md': task('b', 'B', { [FM.due]: dayOffset(0), [FM.listId]: 'L2', [FM.listName]: 'Home' }),
+      },
+    });
+    await view.onOpen();
+    const sel = q<HTMLSelectElement>('.gtasks-view-add-list select')!;
+    sel.value = 'L2';
+    sel.dispatchEvent(new Event('change'));
+    handlers.changed.forEach((cb) => cb(makeFile('Google Tasks/a.md') as never));
+    await wait(200);
+    expect(q<HTMLSelectElement>('.gtasks-view-add-list select')!.value).toBe('L2');
+  });
+
+  it('does not rebuild the dropdown options while the set of lists is unchanged', async () => {
+    const { view, handlers } = setup({ notes: base() });
+    await view.onOpen();
+    const opt = q('.gtasks-view-add-list option');
+    handlers.changed.forEach((cb) => cb(makeFile('Google Tasks/a.md') as never));
+    await wait(200);
+    expect(q('.gtasks-view-add-list option')).toBe(opt);
+  });
+});
+
+describe('review follow-ups: accessibility', () => {
+  const base = () => ({ 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) });
+
+  it('keeps the checkbox label static (the title); aria-checked carries the state', async () => {
+    const { view } = setup({ notes: base() });
+    await view.onOpen();
+    const check = q('.gtasks-view-check')!;
+    expect(check.getAttribute('aria-label')).toBe('Alpha');
+    check.click();
+    await settle();
+    expect(check.getAttribute('aria-label')).toBe('Alpha');
+  });
+
+  it('renders the title as a real button', async () => {
+    const { view } = setup({ notes: base() });
+    await view.onOpen();
+    expect(q('.gtasks-view-task-title')!.tagName).toBe('BUTTON');
+  });
+
+  it('Home and End jump to the first and last tab', async () => {
+    const { view } = setup({ notes: base() });
+    await view.onOpen();
+    const tabs = q('.gtasks-view-tabs')!;
+    tabs.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }));
+    expect(q('.gtasks-view-tab[aria-selected="true"]')!.getAttribute('data-filter')).toBe('all');
+    tabs.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }));
+    expect(q('.gtasks-view-tab[aria-selected="true"]')!.getAttribute('data-filter')).toBe('today');
+  });
+
+  it('announces sync state through one role=status node, not an aria-live label that ticks', async () => {
+    const { view } = setup({ notes: base() });
+    await view.onOpen();
+    expect(q('.gtasks-view-sync-label')!.hasAttribute('aria-live')).toBe(false);
+    expect(qa('[role="status"]')).toHaveLength(1);
+    q('.gtasks-view-sync button')!.click();
+    await settle(); await settle();
+    expect(q('[role="status"]')!.textContent).toBe('Tasks synced');
+  });
+});
+
+describe('review follow-ups: teardown', () => {
+  it('onClose clears the pending refresh timer and the interval', async () => {
+    const clear = vi.spyOn(window, 'clearInterval');
+    const { view, handlers, getMarkdownFiles } = setup({ notes: { 'Google Tasks/a.md': task('a', 'A') } } as never);
+    await view.onOpen();
+    handlers.changed.forEach((cb) => cb(makeFile('Google Tasks/a.md') as never));
+    await view.onClose();
+    getMarkdownFiles.mockClear();
+    await wait(250);
+    expect(getMarkdownFiles).not.toHaveBeenCalled();
+    expect(clear).toHaveBeenCalled();
+    clear.mockRestore();
   });
 });
