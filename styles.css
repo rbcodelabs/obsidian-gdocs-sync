@@ -513,7 +513,6 @@
   cursor: pointer;
   transition: background 0.12s, border-color 0.12s;
 }
-.gtasks-view-check:hover:not(.is-done),
 .gtasks-view-row:not(.is-done):not(.is-completing) .gtasks-view-check:hover {
   background: transparent;
   border-color: var(--interactive-accent);
@@ -550,6 +549,7 @@
 .gtasks-view-row.is-completing .gtasks-view-task-title { color: var(--text-faint); text-decoration: line-through; }
 
 .gtasks-view-meta { display: flex; gap: 8px; align-items: center; margin-top: 3px; min-width: 0; white-space: nowrap; overflow: hidden; }
+.gtasks-view-meta:empty { display: none; }
 .gtasks-view-due {
   flex: none;
   height: auto;
@@ -575,14 +575,20 @@
 }
 .gtasks-view-due.is-today {
   background: color-mix(in srgb, var(--text-warning, var(--color-orange, #d97706)) 16%, transparent);
-  color: var(--text-warning, color-mix(in srgb, var(--color-orange, #d97706) 82%, var(--text-normal)));
+  color: var(--text-warning, color-mix(in srgb, var(--color-orange, #d97706) 62%, var(--text-normal)));
 }
 .gtasks-view-due.is-today:hover {
   background: color-mix(in srgb, var(--text-warning, var(--color-orange, #d97706)) 24%, transparent);
+  color: var(--text-warning, color-mix(in srgb, var(--color-orange, #d97706) 62%, var(--text-normal)));
+}
+.theme-dark .gtasks-view-due.is-today,
+.theme-dark .gtasks-view-due.is-today:hover,
+[data-theme="dark"] .gtasks-view-due.is-today,
+[data-theme="dark"] .gtasks-view-due.is-today:hover {
   color: var(--text-warning, color-mix(in srgb, var(--color-orange, #d97706) 82%, var(--text-normal)));
 }
-.gtasks-view-list { display: inline-flex; gap: 5px; align-items: center; min-width: 0; font-size: var(--font-ui-smaller); color: var(--text-faint); }
-.gtasks-view-list-name { overflow: hidden; text-overflow: ellipsis; }
+.gtasks-view-list { display: inline-flex; gap: 5px; align-items: center; min-width: 0; max-width: 100%; overflow: hidden; font-size: var(--font-ui-smaller); color: var(--text-faint); }
+.gtasks-view-list-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .gtasks-view-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
 
 /* hover actions float over the row so they never steal width */
@@ -616,7 +622,7 @@
 }
 .gtasks-view-title-input:focus,
 .gtasks-view-title-input:focus-visible {
-  outline: none;
+  outline: 2px solid transparent;
   box-shadow: 0 1px 0 0 var(--interactive-accent);
 }
 .gtasks-view-date-input {
@@ -629,10 +635,15 @@
   background: var(--background-primary);
   border: 1px solid var(--background-modifier-border);
   border-radius: var(--radius-s);
+  color-scheme: light;
+}
+.theme-dark .gtasks-view-date-input,
+[data-theme="dark"] .gtasks-view-date-input {
+  color-scheme: dark;
 }
 .gtasks-view-date-input:focus,
 .gtasks-view-date-input:focus-visible {
-  outline: none;
+  outline: 2px solid transparent;
   border-color: var(--interactive-accent);
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
@@ -697,7 +708,7 @@
 }
 .gtasks-view-add-input:focus,
 .gtasks-view-add-input:focus-visible {
-  outline: none;
+  outline: 2px solid transparent;
   border-color: var(--interactive-accent);
   box-shadow: 0 0 0 1px var(--interactive-accent);
 }
@@ -720,17 +731,18 @@
 /* wide (tab) layout: horizontal controls, one line per task, single-row quick add */
 .gtasks-view.is-wide .gtasks-view-header { padding: 14px 20px 10px; }
 .gtasks-view.is-wide .gtasks-view-controls { flex-direction: row; align-items: center; flex-wrap: nowrap; }
-.gtasks-view.is-wide .gtasks-view-tabs { flex: 0 1 360px; width: auto; }
-.gtasks-view.is-wide .gtasks-view-tab { font-size: var(--font-ui-small); height: 26px; padding: 0 8px; }
-.gtasks-view.is-wide .gtasks-view-list-select { flex: 0 1 auto; width: auto; min-width: 0; max-width: 220px; margin-left: 12px; }
+.gtasks-view.is-wide .gtasks-view-tabs { flex: 0 0 auto; width: auto; }
+.gtasks-view.is-wide .gtasks-view-tab { flex: 0 0 auto; font-size: var(--font-ui-small); height: 26px; padding: 0 10px; }
+.gtasks-view.is-wide .gtasks-view-list-select { flex: 0 1 200px; width: auto; min-width: 110px; max-width: 200px; margin-left: 12px; }
 .gtasks-view.is-wide .gtasks-view-list-select select.dropdown,
-.gtasks-view.is-wide .gtasks-view-list-select select { width: auto; min-width: 130px; max-width: 100%; height: 32px; line-height: 30px; }
+.gtasks-view.is-wide .gtasks-view-list-select select { width: 100%; min-width: 0; max-width: 100%; height: 32px; line-height: 30px; }
 .gtasks-view.is-wide .gtasks-view-body { padding: 6px 14px 12px; }
 .gtasks-view.is-wide .gtasks-view-row { grid-template-columns: 18px minmax(0, 1fr) auto 54px; align-items: center; }
 .gtasks-view.is-wide .gtasks-view-main { display: contents; }
 .gtasks-view.is-wide .gtasks-view-task-title,
 .gtasks-view.is-wide .gtasks-view-title-input { grid-column: 2; grid-row: 1; }
-.gtasks-view.is-wide .gtasks-view-meta { grid-column: 3; grid-row: 1; margin: 0; justify-content: flex-end; min-width: 150px; }
+.gtasks-view.is-wide .gtasks-view-meta { grid-column: 3; grid-row: 1; margin: 0; justify-content: flex-end; min-width: 0; max-width: 220px; overflow: hidden; }
+.gtasks-view.is-wide .gtasks-view-list-name { max-width: 150px; }
 .gtasks-view.is-wide .gtasks-view-date-input { grid-column: 3; grid-row: 1; margin: 0; }
 .gtasks-view.is-wide .gtasks-view-check { margin: 0; }
 .gtasks-view.is-wide .gtasks-view-row.is-sub::before { height: 50%; }
@@ -740,7 +752,8 @@
 .gtasks-view.is-wide .gtasks-view-row:hover .gtasks-view-tail,
 .gtasks-view.is-wide .gtasks-view-row:focus-within .gtasks-view-tail { visibility: visible; }
 .gtasks-view.is-wide .gtasks-view-row.is-editing { grid-template-columns: 18px minmax(0, 1fr) auto; }
-.gtasks-view-row.is-editing .gtasks-view-tail { display: none !important; }
+.gtasks-view-row.is-editing .gtasks-view-tail,
+.gtasks-view.is-wide .gtasks-view-row.is-editing .gtasks-view-tail { display: none; }
 .gtasks-view.is-wide .gtasks-view-add {
   grid-template-columns: minmax(130px, 180px) minmax(0, 1fr) auto;
   padding: 10px 20px;

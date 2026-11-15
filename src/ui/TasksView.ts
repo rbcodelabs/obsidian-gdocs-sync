@@ -476,13 +476,13 @@ export class TasksView extends ItemView {
 
     const tail = row.createDiv({ cls: 'gtasks-view-tail' });
     const edit = tail.createEl('button', {
-      cls: 'gtasks-view-icon-btn clickable-icon',
+      cls: 'gtasks-view-icon-btn gtasks-view-edit-btn clickable-icon',
       attr: { type: 'button', 'aria-label': `Edit ${task.title}`, title: 'Edit' },
     });
     setIcon(edit, 'pencil');
     edit.addEventListener('click', () => this.startEdit(task));
     const open = tail.createEl('button', {
-      cls: 'gtasks-view-icon-btn clickable-icon',
+      cls: 'gtasks-view-icon-btn gtasks-view-open-btn clickable-icon',
       attr: { type: 'button', 'aria-label': `Open note for ${task.title}`, title: 'Open note' },
     });
     setIcon(open, 'external-link');
@@ -649,7 +649,13 @@ export class TasksView extends ItemView {
     if (!a || !this.bodyEl.contains(a)) return null;
     const row = a.closest<HTMLElement>('[data-path]');
     if (row?.dataset.path) {
-      const cls = ['gtasks-view-check', 'gtasks-view-task-title', 'gtasks-view-due'].find((c) => a.classList.contains(c));
+      const cls = [
+        'gtasks-view-check',
+        'gtasks-view-task-title',
+        'gtasks-view-due',
+        'gtasks-view-edit-btn',
+        'gtasks-view-open-btn',
+      ].find((c) => a.classList.contains(c));
       return cls ? { path: row.dataset.path, cls } : null;
     }
     const head = a.closest<HTMLElement>('[data-bucket]');

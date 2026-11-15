@@ -3,7 +3,7 @@ import { resolve } from 'path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TFile, Notice, noticeLog } from 'obsidian';
 import { FM } from '../../src/converter/TaskNoteMapper';
-import { TasksView, TASKS_VIEW_TYPE, LIST_COLORS, listColor } from '../../src/ui/TasksView';
+import { TasksView, TASKS_VIEW_TYPE, WIDE_BREAKPOINT, LIST_COLORS, listColor } from '../../src/ui/TasksView';
 import { localDateString } from '../../src/tasks/TaskStore';
 import { DEFAULT_SETTINGS } from '../../src/types';
 
@@ -600,9 +600,10 @@ describe('Geode host layout and CSS regressions', () => {
     expect(selectDropdown['min-width']).toBe('0');
     expect(selectDropdown['max-width']).toBe('100%');
 
-    // 3. Narrow controls stack vertically; wide controls switch to a horizontal row
+    // 3. Narrow controls stack vertically; wide controls switch to a horizontal row with non-shrinking tabs
     expect(mergedCssDecls(rules, '.gtasks-view-controls')['flex-direction']).toBe('column');
     expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-controls')['flex-direction']).toBe('row');
+    expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-tabs').flex).toBe('0 0 auto');
 
     // 4. Quick-add separates list select row from input+button in narrow mode and uses 3-column inline grid in wide mode
     const narrowAdd = mergedCssDecls(rules, '.gtasks-view-add');
@@ -618,7 +619,19 @@ describe('Geode host layout and CSS regressions', () => {
     expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-add-input')['grid-column']).toBe('2');
     expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-add-btn')['grid-column']).toBe('3');
 
-    // 5. All three text/date inputs explicitly theme background, border, and color, and define accessible :focus-visible cues
+    // 5. Wide-mode .gtasks-view-meta caps max-width so long list names cannot crush task titles
+    const wideMeta = mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-meta');
+    expect(wideMeta['min-width']).toBe('0');
+    expect(wideMeta['max-width']).toBe('220px');
+    expect(wideMeta.overflow).toBe('hidden');
+    expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-list-name')['max-width']).toBe('150px');
+    expect(mergedCssDecls(rules, '.gtasks-view-meta:empty').display).toBe('none');
+
+    // 6. All three text/date inputs explicitly theme background, border, and color, preserve forced-colors outlines, and theme dark-mode date picker icon
+    expect(mergedCssDecls(rules, '.gtasks-view-date-input')['color-scheme']).toBe('light');
+    expect(mergedCssDecls(rules, '.theme-dark .gtasks-view-date-input')['color-scheme']).toBe('dark');
+    expect(mergedCssDecls(rules, '[data-theme="dark"] .gtasks-view-date-input')['color-scheme']).toBe('dark');
+
     for (const inputSel of ['.gtasks-view-add-input', '.gtasks-view-title-input', '.gtasks-view-date-input']) {
       const inputDecls = mergedCssDecls(rules, inputSel);
       expect(inputDecls.background, `${inputSel} background`).toBeDefined();
@@ -626,17 +639,73 @@ describe('Geode host layout and CSS regressions', () => {
       expect(inputDecls.color, `${inputSel} color`).toBeDefined();
 
       const focusVisibleDecls = mergedCssDecls(rules, `${inputSel}:focus-visible`);
+      expect(focusVisibleDecls.outline, `${inputSel}:focus-visible forced-colors outline`).toBe('2px solid transparent');
       const hasFocusRing = Boolean(
         (focusVisibleDecls['border-color'] && focusVisibleDecls['border-color'] !== 'transparent') ||
-        (focusVisibleDecls['box-shadow'] && focusVisibleDecls['box-shadow'] !== 'none') ||
-        (focusVisibleDecls.outline && focusVisibleDecls.outline !== 'none'),
+        (focusVisibleDecls['box-shadow'] && focusVisibleDecls['box-shadow'] !== 'none'),
       );
       expect(hasFocusRing, `${inputSel}:focus-visible must show an accessible focus indicator`).toBe(true);
     }
 
-    // 6. Task title and unchecked checkbox hover explicitly guard background against Geode's global button:hover rule
+    // 7. Task title and unchecked checkbox hover guard background against Geode's button:hover, and editing hides tail without !important
     expect(mergedCssDecls(rules, '.gtasks-view-task-title:hover').background).toBe('transparent');
-    expect(mergedCssDecls(rules, '.gtasks-view-check:hover:not(.is-done)').background).toBe('transparent');
     expect(mergedCssDecls(rules, '.gtasks-view-row:not(.is-done):not(.is-completing) .gtasks-view-check:hover').background).toBe('transparent');
+    expect(mergedCssDecls(rules, '.gtasks-view-check:hover:not(.is-done)').background).toBeUndefined();
+    expect(mergedCssDecls(rules, '.gtasks-view-row.is-editing .gtasks-view-tail').display).toBe('none');
+    expect(mergedCssDecls(rules, '.gtasks-view.is-wide .gtasks-view-row.is-editing .gtasks-view-tail').display).toBe('none');
+  });
+
+  it('toggles .is-wide across the 560px ResizeObserver boundary (559 vs 560) and disconnects on onClose()', async () => {
+    let observerCallback!: (entries: Array<{ contentRect: { width: number } }>) => void;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(cb: typeof observerCallback) { observerCallback = cb; }
+      observe = observe;
+      disconnect = disconnect;
+    });
+
+    try {
+      const { view } = setup({ notes: { 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) } });
+      await view.onOpen();
+      const root = q('.gtasks-view')!;
+      expect(observe).toHaveBeenCalledWith(root);
+      expect(WIDE_BREAKPOINT).toBe(560);
+
+      observerCallback([{ contentRect: { width: 559 } }]);
+      expect(root.classList.contains('is-wide')).toBe(false);
+
+      observerCallback([{ contentRect: { width: 560 } }]);
+      expect(root.classList.contains('is-wide')).toBe(true);
+
+      observerCallback([{ contentRect: { width: 559 } }]);
+      expect(root.classList.contains('is-wide')).toBe(false);
+
+      await view.onClose();
+      expect(disconnect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('preserves focus on row tail action buttons (edit and open note) across background refreshes', async () => {
+    const { view, handlers } = setup({
+      notes: { 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) },
+    });
+    await view.onOpen();
+
+    for (const sel of ['.gtasks-view-edit-btn', '.gtasks-view-open-btn']) {
+      const before = q<HTMLElement>(sel)!;
+      before.focus();
+      expect(document.activeElement).toBe(before);
+
+      handlers.changed.forEach((cb) => cb(makeFile('Google Tasks/a.md') as never));
+      await wait(200);
+
+      const after = q<HTMLElement>(sel)!;
+      expect(after).not.toBe(before);
+      expect(document.activeElement).toBe(after);
+    }
+    await view.onClose();
   });
 });
