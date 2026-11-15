@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { canonicalJson } from '../../src/sync/drive/ImmutableDriveClient';
 import { GoogleDriveSyncProvider } from '../../src/sync/GoogleDriveSyncProvider';
+import { mapWithConcurrency, SCAN_CONCURRENCY } from '../../src/sync/drive/DriveHistorySession';
 import type { HistoryRecord } from 'geode';
 
 type Stored = { meta: Record<string, any>; bytes: ArrayBuffer };
@@ -398,5 +399,170 @@ describe('append-only Google Drive vaults', () => {
     const record: HistoryRecord = { schema: 1, vaultId: binding.vaultId, recordId: uuid(4), operationId: uuid(3), deviceId: uuid(2), entityId: uuid(5), namespace: 'content', parents: [], kind: 'file', deleted: false, location: { parentId: null, name: 'file.bin' }, blob: { id: 'missing', size: 1, sha256: '0'.repeat(64) } };
     await expect(session.appendRecord(record, abort())).rejects.toThrow();
     expect(remote.files.size).toBe(2);
+  });
+});
+
+describe('mapWithConcurrency', () => {
+  const tick = (ms = 1) => new Promise(resolve => setTimeout(resolve, ms));
+  function tracked<T>(work: (item: T, index: number) => Promise<unknown>) {
+    const stats = { active: 0, peak: 0, started: [] as number[] };
+    const task = async (item: T, index: number) => {
+      stats.active++; stats.peak = Math.max(stats.peak, stats.active); stats.started.push(index);
+      try { return await work(item, index); } finally { stats.active--; }
+    };
+    return { stats, task };
+  }
+
+  it('never runs more than the limit at once, yet does run the limit concurrently', async () => {
+    const { stats, task } = tracked(async (item: number) => { await tick(item % 3); return item * 2; });
+    const items = Array.from({ length: 40 }, (_, index) => index);
+    await expect(mapWithConcurrency(items, 6, task)).resolves.toEqual(items.map(item => item * 2));
+    expect(stats.peak).toBe(6);
+  });
+  it('returns results in input order even when later items finish first', async () => {
+    const items = [30, 1, 20, 2, 10];
+    await expect(mapWithConcurrency(items, 5, async ms => { await tick(ms); return ms; })).resolves.toEqual(items);
+  });
+  it('handles empty input and a limit larger than the input', async () => {
+    await expect(mapWithConcurrency([], 4, async () => 1)).resolves.toEqual([]);
+    const { stats, task } = tracked(async () => { await tick(); });
+    await mapWithConcurrency([1, 2], 8, task); expect(stats.peak).toBe(2);
+  });
+  it('rejects invalid limits', async () => {
+    for (const limit of [0, -1, 1.5, Number.NaN]) await expect(mapWithConcurrency([1], limit, async () => 1)).rejects.toThrow(RangeError);
+  });
+  it('rethrows the first failure, starts no further items, and waits for in-flight work to settle first', async () => {
+    let settledAfterFailure = false;
+    const { stats, task } = tracked(async (item: number) => {
+      if (item === 2) { await tick(1); throw new Error('item 2 failed'); }
+      if (item === 3) { await tick(20); settledAfterFailure = true; return item; }
+      await tick(1); return item;
+    });
+    await expect(mapWithConcurrency(Array.from({ length: 20 }, (_, index) => index), 4, task)).rejects.toThrow('item 2 failed');
+    expect(settledAfterFailure).toBe(true);
+    expect(stats.active).toBe(0);
+    expect(stats.started.length).toBeLessThan(20);
+  });
+  it('matches serial semantics with a limit of one', async () => {
+    const { stats, task } = tracked(async (item: number) => { await tick(); return item; });
+    await mapWithConcurrency([1, 2, 3], 1, task);
+    expect(stats.peak).toBe(1); expect(stats.started).toEqual([0, 1, 2]);
+  });
+});
+
+describe('bounded scan concurrency', () => {
+  beforeEach(() => { vi.mocked(requestUrl).mockReset(); vi.stubGlobal('fetch', vi.fn(() => { throw new Error('Renderer fetch forbidden'); })); });
+
+  // Wraps the fake Drive so matching requests are held briefly (varying delays,
+  // so completion order differs from issue order) and counts how many are
+  // outstanding at once.
+  function instrument(remote: ReturnType<typeof drive>, matches: (url: URL) => boolean) {
+    const stats = { active: 0, peak: 0, total: 0 };
+    vi.mocked(requestUrl).mockImplementation(async arg => {
+      const url = new URL((arg as RequestUrlParam).url);
+      if (!matches(url)) return remote.handler(arg as RequestUrlParam);
+      stats.active++; stats.total++; stats.peak = Math.max(stats.peak, stats.active);
+      try { await new Promise(resolve => setTimeout(resolve, Math.max(1, 12 - stats.total % 12))); return await remote.handler(arg as RequestUrlParam); }
+      finally { stats.active--; }
+    });
+    return stats;
+  }
+  const idsOf = (remote: ReturnType<typeof drive>, kind: string) => new Set([...remote.files.values()].filter(value => value.meta.appProperties?.geodeObjectKind === kind).map(value => value.meta.id as string));
+  const idFrom = (url: URL) => decodeURIComponent(url.pathname.split('/').at(-1)!);
+  const folderRecord = (vaultId: string, index: number): HistoryRecord => ({ schema: 1, vaultId, recordId: uuid(1000 + index), operationId: uuid(2000 + index), deviceId: uuid(2), entityId: uuid(3000 + index), namespace: 'content', parents: [], kind: 'folder', deleted: false, location: { parentId: null, name: `folder-${index}` } });
+
+  it('reads bootstrap records with bounded concurrency and returns them in listing order', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const written: HistoryRecord[] = [];
+    for (let index = 0; index < 25; index++) { const record = folderRecord(binding.vaultId, index); written.push(record); await writer.appendRecord(record, abort()); }
+    const records = idsOf(remote, 'record');
+    const stats = instrument(remote, url => url.searchParams.get('alt') === 'media' && records.has(idFrom(url)));
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(3) }, abort());
+    const scan = await reader.scan(undefined, abort());
+    expect(scan.records).toEqual(written);
+    expect(stats.total).toBe(25);
+    expect(stats.peak).toBeGreaterThan(1);
+    expect(stats.peak).toBeLessThanOrEqual(SCAN_CONCURRENCY);
+  });
+
+  it('reads changed records from a changes page with bounded concurrency, in page order', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(3) }, abort());
+    const initial = await reader.scan(undefined, abort());
+    const written: HistoryRecord[] = [];
+    for (let index = 0; index < 20; index++) { const record = folderRecord(binding.vaultId, index); written.push(record); await writer.appendRecord(record, abort()); }
+    const records = idsOf(remote, 'record');
+    const stats = instrument(remote, url => url.searchParams.get('alt') === 'media' && records.has(idFrom(url)));
+    const next = await reader.scan(initial.cursor, abort());
+    expect(next.records).toEqual(written);
+    expect(stats.total).toBe(20);
+    expect(stats.peak).toBeGreaterThan(1);
+    expect(stats.peak).toBeLessThanOrEqual(SCAN_CONCURRENCY);
+  });
+
+  it('checks referenced blob availability with bounded concurrency and unchanged results', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const blobs = [];
+    for (let index = 0; index < 15; index++) {
+      const data = new TextEncoder().encode(`blob-${index}`).buffer;
+      const blob = await writer.putBlob({ operationId: uuid(4000 + index), sha256: digest(data), size: data.byteLength, data }, abort()); blobs.push(blob);
+      await writer.appendRecord({ ...folderRecord(binding.vaultId, index), operationId: uuid(4000 + index), kind: 'file', location: { parentId: null, name: `file-${index}.bin` }, blob }, abort());
+    }
+    const missing = blobs[7]; remote.files.delete(missing.id);
+    const blobIds = idsOf(remote, 'blob'); blobIds.add(missing.id);
+    const stats = instrument(remote, url => url.searchParams.has('fields') && blobIds.has(idFrom(url)));
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(3) }, abort());
+    const scan = await reader.scan(undefined, abort());
+    expect(scan.blobAvailability).toEqual(blobs.map(blob => ({ id: blob.id, status: blob.id === missing.id ? 'pending' : 'available' })));
+    expect(stats.total).toBe(15);
+    expect(stats.peak).toBeGreaterThan(1);
+    expect(stats.peak).toBeLessThanOrEqual(SCAN_CONCURRENCY);
+    // Pending evidence is still persisted exactly as the serial version did.
+    const pending = [...b.state.entries()].find(([key]) => key.endsWith('/pending-blobs'))?.[1];
+    expect(pending).toEqual({ [missing.id]: missing });
+  });
+
+  it('ignores a failed prefetch for a record read the serial pass never reaches', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const session = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    const data = new TextEncoder().encode('synthetic').buffer;
+    const blob = await session.putBlob({ operationId: uuid(3), sha256: digest(data), size: data.byteLength, data }, abort());
+    await session.readBlob(blob, abort());
+    const initial = await session.scan(undefined, abort());
+    // A known blob reappears in the changes feed dressed as a record. The serial
+    // scan flags it corrupt from metadata alone and never reads its body.
+    const disguised = { ...remote.files.get(blob.id)!.meta, name: `${uuid(9)}.json`, mimeType: 'application/json', version: '2', appProperties: { ...remote.files.get(blob.id)!.meta.appProperties, geodeObjectKind: 'record', geodeRecordId: uuid(9) } };
+    remote.changes.push({ sequence: 100, fileId: blob.id, file: disguised });
+    vi.mocked(requestUrl).mockImplementation(async arg => {
+      const url = new URL((arg as RequestUrlParam).url);
+      if (url.searchParams.get('alt') === 'media' && url.pathname.endsWith(`/${blob.id}`)) return { status: 400, json: {}, headers: {}, arrayBuffer: new ArrayBuffer(0), text: '' } as never;
+      return remote.handler(arg as RequestUrlParam);
+    });
+    const next = await session.scan(initial.cursor, abort());
+    expect(next.status).toBe('complete');
+    expect(next.blobAvailability).toContainEqual({ id: blob.id, status: 'corrupt' });
+  });
+
+  it('fails the whole scan without persisting observations when one concurrent record read fails', async () => {
+    const remote = drive(); vi.mocked(requestUrl).mockImplementation(remote.handler as never);
+    const a = local(); const binding = await a.provider.createVault({ name: 'QA', operationId: uuid(1) }, abort());
+    const writer = await a.provider.open({ binding, deviceId: uuid(2) }, abort());
+    for (let index = 0; index < 12; index++) await writer.appendRecord(folderRecord(binding.vaultId, index), abort());
+    const failing = [...idsOf(remote, 'record')][5];
+    vi.mocked(requestUrl).mockImplementation(async arg => {
+      const url = new URL((arg as RequestUrlParam).url);
+      if (url.searchParams.get('alt') === 'media' && idFrom(url) === failing) return { status: 400, json: {}, headers: {}, arrayBuffer: new ArrayBuffer(0), text: '' } as never;
+      return remote.handler(arg as RequestUrlParam);
+    });
+    const b = local(); const reader = await b.provider.open({ binding, deviceId: uuid(3) }, abort());
+    await expect(reader.scan(undefined, abort())).rejects.toThrow('400');
+    expect(b.config.saveDeviceState.mock.calls.filter(([key]) => key.includes('/observed/'))).toHaveLength(0);
   });
 });

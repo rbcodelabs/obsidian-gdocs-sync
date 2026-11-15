@@ -65,10 +65,36 @@ export interface ImmutableCreate {
   data: ArrayBuffer;
   sha256: string;
 }
+/**
+ * Client-side deadline for ONE attempt of a small Drive call (metadata, listing,
+ * changes page, record read).
+ *
+ * Without it, an attempt whose connection stalls — no response and no thrown
+ * error — never settles, so the retry/backoff below never engages and a shared
+ * vault scan sat silent for hours. 45s is far above a healthy Drive round trip,
+ * and with 4 attempts plus capped backoff a dead connection now surfaces as an
+ * ordinary "interrupted" failure in roughly three minutes.
+ */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 45_000;
+/**
+ * Throughput floor (~256 kbps) used to extend the deadline for large bodies. A
+ * fixed 45s would kill a legitimate 4 MiB resumable chunk or a large blob read on
+ * a slow-but-live link; the extension keeps the per-attempt bound proportional to
+ * the bytes actually being moved.
+ */
+export const MIN_TRANSFER_BYTES_PER_SECOND = 32 * 1024;
 export interface DriveClientOptions {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
   sessions?: { load(key: string): Promise<string | null>; save(key: string, value: string): Promise<void>; remove(key: string): Promise<void> };
+  /** Base per-attempt deadline; defaults to DEFAULT_REQUEST_TIMEOUT_MS. */
+  requestTimeoutMs?: number;
+  /** Produces the per-attempt deadline signal; defaults to AbortSignal.timeout. Injected by tests. */
+  timeoutSignal?: (ms: number) => AbortSignal;
+}
+export interface DriveRequestOptions {
+  /** Known response size for media downloads, so large reads get a proportional deadline. */
+  expectedBytes?: number;
 }
 export class ImmutableDriveClient {
   private queues = new Map<string, Promise<unknown>>();
@@ -181,26 +207,28 @@ export class ImmutableDriveClient {
     const mismatch = verifyMismatch(id, actual, expected);
     if (mismatch) throw new Error(`Immutable object integrity failure: ${mismatch}`);
     if (expected.metadata.mimeType === 'application/vnd.google-apps.folder') return actual.version;
-    const bytes = (await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?alt=media` }, signal)).arrayBuffer;
+    const bytes = (await this.request({ url: `${DRIVE}/files/${encodeURIComponent(id)}?alt=media` }, signal, [], true, { expectedBytes: expected.data.byteLength })).arrayBuffer;
     if (bytes.byteLength !== expected.data.byteLength || await sha256Bytes(bytes) !== expected.sha256) throw new Error('Immutable object integrity failure: content mismatch');
     return actual.version;
   }
 
-  async request(params: RequestUrlParam, signal: AbortSignal, accepted: number[] = [], retry = true): Promise<RequestUrlResponse> {
+  async request(params: RequestUrlParam, signal: AbortSignal, accepted: number[] = [], retry = true, options: DriveRequestOptions = {}): Promise<RequestUrlResponse> {
     this.auth.assertCurrent();
     signal.throwIfAborted();
     let token = await this.auth.getAccessToken();
     this.auth.assertCurrent();
     let refreshed = false;
+    const timeoutMs = this.timeoutFor(params, options.expectedBytes);
     for (let attempt = 0; attempt < 4; attempt++) {
       this.auth.assertCurrent();
       signal.throwIfAborted();
       let response: RequestUrlResponse;
       try {
-        // signal is a Geode extension; the provider is only loaded on that host.
-        const request: RequestUrlParam & { signal: AbortSignal } = { ...params, headers: { ...params.headers, Authorization: `Bearer ${token}` }, throw: false, signal };
-        response = await requestUrl(request);
+        response = await this.send({ ...params, headers: { ...params.headers, Authorization: `Bearer ${token}` }, throw: false }, signal, timeoutMs);
       } catch {
+        // A timed-out attempt lands here exactly like any other transport failure.
+        // `signal` is only the caller's cancellation, never the deadline, so the
+        // check below still distinguishes real cancellation from a stall.
         this.auth.assertCurrent();
         signal.throwIfAborted();
         if (!retry || attempt === 3) throw new Error('Drive request interrupted; remote commit is unknown. Retry the same operation.');
@@ -224,6 +252,33 @@ export class ImmutableDriveClient {
       throw new Error(`Drive request failed (${response.status}); ${response.status === 401 ? 'reconnect your Google account' : response.status === 403 ? 'check account permissions or quota' : 'retry when service is available'}`);
     }
     throw new Error('Drive retry limit reached');
+  }
+
+  /**
+   * One transport attempt bounded by a deadline. The deadline is composed with the
+   * caller's signal for the transport only, and the attempt is also raced against
+   * that composite signal client-side: a transport that ignores its signal (or a
+   * host bridge that never settles) still cannot outlive the deadline.
+   */
+  private send(request: RequestUrlParam, signal: AbortSignal, timeoutMs: number): Promise<RequestUrlResponse> {
+    const deadline = (this.options.timeoutSignal ?? (ms => AbortSignal.timeout(ms)))(timeoutMs);
+    const bounded = AbortSignal.any([signal, deadline]);
+    return new Promise<RequestUrlResponse>((resolve, reject) => {
+      if (bounded.aborted) { reject(bounded.reason); return; }
+      const abort = () => reject(bounded.reason ?? new DOMException('Aborted', 'AbortError'));
+      bounded.addEventListener('abort', abort, { once: true });
+      // signal is a Geode extension; the provider is only loaded on that host.
+      const withSignal: RequestUrlParam & { signal: AbortSignal } = { ...request, signal: bounded };
+      // The loser of the race is absorbed here: once aborted, a late settlement is a no-op.
+      Promise.resolve().then(() => requestUrl(withSignal)).then(resolve, reject).finally(() => bounded.removeEventListener('abort', abort));
+    });
+  }
+
+  private timeoutFor(params: RequestUrlParam, expectedBytes = 0): number {
+    const base = this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    const body = params.body === undefined ? 0 : typeof params.body === 'string' ? new TextEncoder().encode(params.body).byteLength : params.body.byteLength;
+    const bytes = Math.max(body, Number.isFinite(expectedBytes) && expectedBytes > 0 ? expectedBytes : 0);
+    return base + Math.ceil(bytes / MIN_TRANSFER_BYTES_PER_SECOND * 1000);
   }
 
   private async backoff(attempt: number, signal: AbortSignal, retryAfter?: string): Promise<void> {

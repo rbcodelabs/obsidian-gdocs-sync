@@ -3,6 +3,37 @@ import type { DriveProviderConfig } from '../GoogleDriveSyncProvider';
 import { canonicalJson, ImmutableDriveClient, MAX_BLOB_SIZE, sha256Bytes, type DriveAuth } from './ImmutableDriveClient';
 
 export const PROTOCOL = 'append-only-history-v1' as const;
+/**
+ * Maximum Drive round trips a scan keeps in flight. A shared vault's first scan
+ * reads every historical record and checks every referenced blob; one at a time,
+ * that is thousands of sequential round trips. Six in flight cuts the wall time
+ * several-fold while staying well inside Drive's per-user request quota (and its
+ * 429s still flow through ImmutableDriveClient's bounded backoff).
+ */
+export const SCAN_CONCURRENCY = 6;
+type PrefetchedBodies = Map<string, { bytes: ArrayBuffer } | { error: unknown }>;
+
+/**
+ * Maps `items` through `task` with at most `limit` tasks in flight; results keep
+ * input order. On the first failure no further items are started, in-flight tasks
+ * are allowed to settle (so nothing outlives the call), and that first error is
+ * rethrown — the same observable outcome as a serial loop that stops at a throw.
+ */
+export async function mapWithConcurrency<T, R>(items: readonly T[], limit: number, task: (item: T, index: number) => Promise<R>): Promise<R[]> {
+  if (!Number.isInteger(limit) || limit < 1) throw new RangeError('Concurrency limit must be a positive integer');
+  const results = new Array<R>(items.length);
+  let next = 0; let failure: { error: unknown } | undefined;
+  const worker = async () => {
+    while (!failure && next < items.length) {
+      const index = next++;
+      try { results[index] = await task(items[index], index); }
+      catch (error) { failure ??= { error }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  if (failure) throw failure.error;
+  return results;
+}
 const DRIVE = 'https://www.googleapis.com/drive/v3';
 const FIELDS = 'id,name,mimeType,parents,appProperties,size,trashed,version';
 interface Metadata { id: string; name: string; mimeType: string; parents?: string[]; appProperties?: Record<string, string>; size?: string; trashed?: boolean; version: string; }
@@ -26,7 +57,7 @@ export class DriveHistorySession implements AppendOnlySession {
     const meta = await metadataOf(this.client, ref.id, combined);
     this.validateObject(meta, 'blob');
     if (meta.appProperties?.geodeSha256 !== ref.sha256 || Number(meta.size) !== ref.size) throw new Error('Blob metadata integrity failure');
-    const bytes = (await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, combined)).arrayBuffer;
+    const bytes = (await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, combined, [], true, { expectedBytes: ref.size })).arrayBuffer;
     if (bytes.byteLength !== ref.size || await sha256Bytes(bytes) !== ref.sha256) throw new Error('Blob bytes integrity failure');
     await this.observe(meta, ref.sha256, undefined, signal);
     return bytes;
@@ -63,7 +94,12 @@ export class DriveHistorySession implements AppendOnlySession {
       if (previous && (previous.sha256 !== ref.sha256 || previous.size !== ref.size)) availability.set(ref.id, 'corrupt');
       knownRefs.set(ref.id, ref); references.set(ref.id, ref);
     };
-    const read = async (entry: Metadata) => { const record = await this.readRecord(entry, signal, observations); const ref = observations.objects[entry.id]?.blob; if (ref) addReference(ref); return record; };
+    // Record bodies are fetched ahead with bounded concurrency, but every state
+    // mutation (observations, blob references, availability, output order) still
+    // happens in this serial pass, in the original order. addReference in
+    // particular is NOT disjoint across records — many records share one blob id —
+    // so it must stay serial for results to match the one-at-a-time scan exactly.
+    const read = async (entry: Metadata, bodies?: PrefetchedBodies) => { const record = await this.readRecord(entry, signal, observations, bodies); const ref = observations.objects[entry.id]?.blob; if (ref) addReference(ref); return record; };
     const recordVariants = new Set<string>();
     const push = (record: unknown) => { const key = canonicalJson(record); if (!recordVariants.has(key)) { recordVariants.add(key); records.push(record); } };
     const reset = !token;
@@ -72,7 +108,8 @@ export class DriveHistorySession implements AppendOnlySession {
       token = (await this.client.request({ url: `${DRIVE}/changes/startPageToken?fields=startPageToken` }, combined)).json?.startPageToken;
       if (typeof token !== 'string') throw new Error('Drive did not return a changes token');
       const entries = await listFiles(this.client, `'${this.binding.rootId}' in parents and trashed=false and appProperties has { key='geodeObjectKind' and value='record' }`, combined);
-      for (const entry of entries) push(await read(entry));
+      const bodies = await this.prefetchRecordBodies(entries, signal, observations);
+      for (const entry of entries) push(await read(entry, bodies));
       const present = new Set(entries.map(entry => entry.id));
       for (const [id, known] of Object.entries(observations.objects)) {
         if (known.kind === 'record' && !present.has(id)) {
@@ -92,6 +129,8 @@ export class DriveHistorySession implements AppendOnlySession {
         const rescan = await this.scan(undefined, signal); return { ...rescan, reset: true };
       }
       const page = response.json;
+      const changedRecords = (page.changes ?? []).filter((change: any) => !change.removed && !change.file?.trashed && change.file?.parents?.includes(this.binding.rootId) && change.file?.appProperties?.geodeObjectKind === 'record').map((change: any) => change.file as Metadata);
+      const bodies = await this.prefetchRecordBodies(changedRecords, signal, observations);
       for (const change of page.changes ?? []) {
         const known = observations.objects[change.fileId] ?? await this.config.loadDeviceState<Observations['objects'][string]>(this.blobObservationKey(change.fileId));
         if (change.removed || change.file?.trashed) {
@@ -108,17 +147,22 @@ export class DriveHistorySession implements AppendOnlySession {
           const ref = knownRefs.get(change.fileId); if (ref) references.set(ref.id, ref);
         }
         if (change.file?.parents?.includes(this.binding.rootId) && change.file?.appProperties?.geodeObjectKind === 'record') {
-          push(await read(change.file));
+          push(await read(change.file, bodies));
         }
       }
       if (page.nextPageToken) { next = page.nextPageToken; continue; }
       if (typeof page.newStartPageToken !== 'string') throw new Error('Drive changes response omitted its terminal cursor');
       const pending: Record<string, BlobRef> = {};
-      for (const ref of references.values()) {
+      // `references` is keyed by blob id, so each task owns one id: it reads only
+      // availability[ref.id], and blobAvailability's only write (observe) is keyed by
+      // that id and runs under the provider-wide serial lock. Results are applied
+      // afterwards in reference order so the returned availability order is unchanged.
+      const refs = [...references.values()];
+      const states = await mapWithConcurrency(refs, SCAN_CONCURRENCY, async ref => {
         this.check(signal);
-        const state = availability.get(ref.id) === 'corrupt' ? 'corrupt' : await this.blobAvailability(ref, signal, changedBlobs.has(ref.id));
-        availability.set(ref.id, state); if (state === 'pending') pending[ref.id] = ref;
-      }
+        return availability.get(ref.id) === 'corrupt' ? 'corrupt' as const : await this.blobAvailability(ref, signal, changedBlobs.has(ref.id));
+      });
+      refs.forEach((ref, index) => { const state = states[index]; availability.set(ref.id, state); if (state === 'pending') pending[ref.id] = ref; });
       this.check(signal);
       await this.serial(async () => {
         const latest = await this.loadObservations();
@@ -137,13 +181,46 @@ export class DriveHistorySession implements AppendOnlySession {
 
   async close(): Promise<void> { this.closed.abort(); }
 
-  private async readRecord(meta: Metadata, signal: AbortSignal, observations: Observations): Promise<unknown> {
-    const previous = observations.objects[meta.id];
-    const recordId = previous?.recordId ?? meta.appProperties?.geodeRecordId;
+  /** Metadata checks readRecord performs before any network read; evidence means no read. */
+  private recordPrecheck(meta: Metadata, observations: Observations): { recordId: string | undefined; evidence?: unknown } {
+    const recordId = observations.objects[meta.id]?.recordId ?? meta.appProperties?.geodeRecordId;
     try { this.validateObject(meta, 'record'); }
-    catch { return integrityEvidence(recordId, 'Record ownership or metadata is invalid'); }
-    if (meta.appProperties?.geodeRecordId !== recordId || meta.name !== `${recordId}.json` || meta.mimeType !== 'application/json') return integrityEvidence(recordId, 'Record identity metadata changed');
-    const bytes = (await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(meta.id)}?alt=media` }, this.signal(signal))).arrayBuffer;
+    catch { return { recordId, evidence: integrityEvidence(recordId, 'Record ownership or metadata is invalid') }; }
+    if (meta.appProperties?.geodeRecordId !== recordId || meta.name !== `${recordId}.json` || meta.mimeType !== 'application/json') return { recordId, evidence: integrityEvidence(recordId, 'Record identity metadata changed') };
+    return { recordId };
+  }
+
+  private fetchRecordBody(meta: Metadata, signal: AbortSignal): Promise<ArrayBuffer> {
+    return this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(meta.id)}?alt=media` }, this.signal(signal), [], true, { expectedBytes: Number(meta.size) }).then(response => response.arrayBuffer);
+  }
+
+  /**
+   * Fetches record bodies with bounded concurrency ahead of the serial pass. It is
+   * side-effect free (network reads only, into a map owned by this call), so it
+   * cannot change scan results — it can only make the serial pass stop waiting on
+   * the network one round trip at a time. A failure is recorded rather than thrown
+   * and stops further prefetching; readRecord rethrows it only if the serial pass
+   * actually reaches that read, which is exactly where the serial scan would fail.
+   */
+  private async prefetchRecordBodies(entries: Metadata[], signal: AbortSignal, observations: Observations): Promise<PrefetchedBodies> {
+    const bodies: PrefetchedBodies = new Map();
+    const wanted = [...new Map(entries.filter(meta => !this.recordPrecheck(meta, observations).evidence).map(meta => [meta.id, meta])).values()];
+    let failed = false;
+    await mapWithConcurrency(wanted, SCAN_CONCURRENCY, async meta => {
+      if (failed) return;
+      try { bodies.set(meta.id, { bytes: await this.fetchRecordBody(meta, signal) }); }
+      catch (error) { failed = true; bodies.set(meta.id, { error }); }
+    });
+    return bodies;
+  }
+
+  private async readRecord(meta: Metadata, signal: AbortSignal, observations: Observations, bodies?: PrefetchedBodies): Promise<unknown> {
+    const previous = observations.objects[meta.id];
+    const { recordId, evidence } = this.recordPrecheck(meta, observations);
+    if (evidence) return evidence;
+    const prefetched = bodies?.get(meta.id);
+    if (prefetched && 'error' in prefetched) throw prefetched.error;
+    const bytes = prefetched?.bytes ?? await this.fetchRecordBody(meta, signal);
     const hash = await sha256Bytes(bytes);
     if (previous && previous.hash !== hash) return integrityEvidence(recordId, 'Known immutable record bytes changed');
     observations.objects[meta.id] = { version: meta.version, hash, recordId, kind: 'record' };
@@ -171,7 +248,7 @@ export class DriveHistorySession implements AppendOnlySession {
     // Drive versions include server metadata changes; a new version requires bytes,
     // not an assumption that immutable content changed.
     if (!forceRead && previous?.version === meta.version) return 'available';
-    const content = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, this.signal(signal), [404]);
+    const content = await this.client.request({ url: `${DRIVE}/files/${encodeURIComponent(ref.id)}?alt=media` }, this.signal(signal), [404], true, { expectedBytes: ref.size });
     if (content.status === 404) return 'pending';
     if (content.arrayBuffer.byteLength !== ref.size || await sha256Bytes(content.arrayBuffer) !== ref.sha256) return 'corrupt';
     await this.observe(meta, ref.sha256, undefined, signal);
