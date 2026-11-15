@@ -56,6 +56,7 @@ export class TextComponent {
 export class DropdownComponent {
   selectEl: HTMLSelectElement = document.createElement('select');
   constructor(containerEl?: HTMLElement) {
+    this.selectEl.classList.add('dropdown');
     containerEl?.appendChild(this.selectEl);
   }
   addOption(value: string, display: string) {

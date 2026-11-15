@@ -759,3 +759,121 @@ describe('sidebar vs tab width', () => {
     expect(titles()).toEqual(['A']);
   });
 });
+
+// ─── Focus preservation, list-sync coupling, quick-add resilience ─────────────
+
+describe('focus preservation and control coupling across refreshes', () => {
+  it('preserves focus on checkbox, title, due chip (even with special path chars), and section header across refresh', async () => {
+    const trickyPath = 'Google Tasks/Review (Q4) [v2].md';
+    const { view, handlers } = setup({
+      notes: {
+        [trickyPath]: task('q4', 'Review "Q4" [v2]', { [FM.due]: dayOffset(0) }),
+      },
+    });
+    await view.onOpen();
+
+    for (const sel of ['.gtasks-view-check', '.gtasks-view-task-title', '.gtasks-view-due']) {
+      const target = q<HTMLElement>(sel)!;
+      target.focus();
+      expect(document.activeElement).toBe(target);
+
+      fire(handlers, 'changed', makeFile(trickyPath));
+      await wait(200);
+
+      const rebuilt = q<HTMLElement>(sel)!;
+      expect(rebuilt).not.toBe(target);
+      expect(document.activeElement).toBe(rebuilt);
+    }
+
+    const sectionHead = q<HTMLElement>('.gtasks-view-section-head[data-bucket="Today"]')!;
+    sectionHead.focus();
+    fire(handlers, 'changed', makeFile(trickyPath));
+    await wait(200);
+    expect(document.activeElement).toBe(q('.gtasks-view-section-head[data-bucket="Today"]'));
+    await view.onClose();
+  });
+
+  it('points quick-add at a newly filtered list, while preserving a subsequent manual quick-add override', async () => {
+    const { view, handlers } = setup({
+      filter: 'all',
+      notes: {
+        'Google Tasks/a.md': task('a', 'Work item', { [FM.listId]: 'L1', [FM.listName]: 'Work' }),
+        'Google Tasks/b.md': task('b', 'Design item', { [FM.listId]: 'L2', [FM.listName]: 'Product Discovery & Quarterly OKR Follow-ups' }),
+      },
+    });
+    await view.onOpen();
+
+    const headerSelect = q<HTMLSelectElement>('.gtasks-view-list-select select.dropdown')!;
+    const addSelect = q<HTMLSelectElement>('.gtasks-view-add-list select.dropdown')!;
+    expect(addSelect.value).toBe('L2'); // alphabetical first ("Product Discovery..." < "Work")
+
+    // Filtering header list to L1 automatically points quick-add at L1
+    headerSelect.value = 'L1';
+    headerSelect.dispatchEvent(new Event('change'));
+    expect(addSelect.value).toBe('L1');
+
+    // User manually overrides quick-add back to L2 while viewing L1; background refresh keeps both
+    addSelect.value = 'L2';
+    addSelect.dispatchEvent(new Event('change'));
+    fire(handlers, 'changed', makeFile('Google Tasks/a.md'));
+    await wait(200);
+    expect(q<HTMLSelectElement>('.gtasks-view-list-select select.dropdown')!.value).toBe('L1');
+    expect(q<HTMLSelectElement>('.gtasks-view-add-list select.dropdown')!.value).toBe('L2');
+    await view.onClose();
+  });
+
+  it('focusQuickAdd is a safe no-op before onOpen and focuses the quick-add input once open', async () => {
+    const { view } = setup({ notes: { 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) } });
+    expect(() => view.focusQuickAdd()).not.toThrow();
+    await view.onOpen();
+    view.focusQuickAdd();
+    expect(document.activeElement).toBe(q('.gtasks-view-add-input'));
+    await view.onClose();
+  });
+
+  it('defers midnight rollover re-render while an inline edit is active, then re-buckets when editing ends', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date(2026, 10, 13, 23, 59, 40));
+    const ticks: Array<() => void> = [];
+    vi.spyOn(window, 'setInterval').mockImplementation(((cb: () => void) => { ticks.push(cb); return 1; }) as never);
+
+    const { view } = setup({ notes: { 'Google Tasks/a.md': task('a', 'Late night edit', { [FM.due]: '2026-11-13' }) } });
+    await view.onOpen();
+    expect(qa('.gtasks-view-section-head').map((h) => h.dataset.bucket)).toEqual(['Today']);
+
+    // Start inline editing and type unsaved text before midnight
+    q('.gtasks-view-tail button')!.click();
+    const titleInput = q<HTMLInputElement>('.gtasks-view-title-input')!;
+    titleInput.value = 'Draft in progress';
+
+    // Midnight passes while the user is still typing
+    vi.setSystemTime(new Date(2026, 10, 14, 0, 0, 20));
+    ticks.forEach((t) => t());
+
+    // Inline editor must survive untouched
+    expect(q<HTMLInputElement>('.gtasks-view-title-input')!.value).toBe('Draft in progress');
+
+    // Cancelling edit triggers render and re-buckets the task into Overdue for the new day
+    titleInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    await settle();
+    expect(qa('.gtasks-view-section-head').map((h) => h.dataset.bucket)).toEqual(['Overdue']);
+    await view.onClose();
+  });
+
+  it('clears the quick-add input and suppresses error notices when immediate syncLocalToRemote rejects offline', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { view, plugin } = setup({ notes: { 'Google Tasks/a.md': task('a', 'Alpha', { [FM.due]: dayOffset(0) }) } });
+    (plugin.tasksSyncEngine as Record<string, unknown>).syncLocalToRemote = vi.fn().mockRejectedValue(new Error('network offline'));
+
+    await view.onOpen();
+    typeAdd('Offline task');
+    submitAdd();
+    await settle();
+    await settle();
+
+    expect(q<HTMLInputElement>('.gtasks-view-add-input')!.value).toBe('');
+    expect(noticeLog).toEqual([]);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    await view.onClose();
+  });
+});

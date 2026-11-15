@@ -476,13 +476,13 @@ export class TasksView extends ItemView {
 
     const tail = row.createDiv({ cls: 'gtasks-view-tail' });
     const edit = tail.createEl('button', {
-      cls: 'gtasks-view-icon-btn clickable-icon',
+      cls: 'gtasks-view-icon-btn gtasks-view-edit-btn clickable-icon',
       attr: { type: 'button', 'aria-label': `Edit ${task.title}`, title: 'Edit' },
     });
     setIcon(edit, 'pencil');
     edit.addEventListener('click', () => this.startEdit(task));
     const open = tail.createEl('button', {
-      cls: 'gtasks-view-icon-btn clickable-icon',
+      cls: 'gtasks-view-icon-btn gtasks-view-open-btn clickable-icon',
       attr: { type: 'button', 'aria-label': `Open note for ${task.title}`, title: 'Open note' },
     });
     setIcon(open, 'external-link');
@@ -649,7 +649,13 @@ export class TasksView extends ItemView {
     if (!a || !this.bodyEl.contains(a)) return null;
     const row = a.closest<HTMLElement>('[data-path]');
     if (row?.dataset.path) {
-      const cls = ['gtasks-view-check', 'gtasks-view-task-title', 'gtasks-view-due'].find((c) => a.classList.contains(c));
+      const cls = [
+        'gtasks-view-check',
+        'gtasks-view-task-title',
+        'gtasks-view-due',
+        'gtasks-view-edit-btn',
+        'gtasks-view-open-btn',
+      ].find((c) => a.classList.contains(c));
       return cls ? { path: row.dataset.path, cls } : null;
     }
     const head = a.closest<HTMLElement>('[data-bucket]');
@@ -665,12 +671,20 @@ export class TasksView extends ItemView {
   }
 }
 
-/** Stable per-list dot colour from Obsidian's own palette variables. */
-const LIST_COLORS = ['--color-blue', '--color-green', '--color-orange', '--color-purple', '--color-cyan', '--color-pink', '--color-yellow'];
-function listColor(listId: string): string {
+/** Stable per-list dot colour from Obsidian's own palette variables (with Geode fallbacks). */
+export const LIST_COLORS = [
+  'var(--color-blue)',
+  'var(--color-green)',
+  'var(--color-orange)',
+  'var(--color-purple)',
+  'var(--color-cyan, var(--color-blue))',
+  'var(--color-pink, var(--color-purple))',
+  'var(--color-yellow)',
+] as const;
+export function listColor(listId: string): string {
   let h = 0;
   for (let i = 0; i < listId.length; i++) h = (h * 31 + listId.charCodeAt(i)) >>> 0;
-  return `var(${LIST_COLORS[h % LIST_COLORS.length]})`;
+  return LIST_COLORS[h % LIST_COLORS.length];
 }
 
 function cssEscape(value: string): string {
