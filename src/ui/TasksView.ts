@@ -665,12 +665,20 @@ export class TasksView extends ItemView {
   }
 }
 
-/** Stable per-list dot colour from Obsidian's own palette variables. */
-const LIST_COLORS = ['--color-blue', '--color-green', '--color-orange', '--color-purple', '--color-cyan', '--color-pink', '--color-yellow'];
-function listColor(listId: string): string {
+/** Stable per-list dot colour from Obsidian's own palette variables (with Geode fallbacks). */
+export const LIST_COLORS = [
+  'var(--color-blue)',
+  'var(--color-green)',
+  'var(--color-orange)',
+  'var(--color-purple)',
+  'var(--color-cyan, var(--color-blue))',
+  'var(--color-pink, var(--color-purple))',
+  'var(--color-yellow)',
+] as const;
+export function listColor(listId: string): string {
   let h = 0;
   for (let i = 0; i < listId.length; i++) h = (h * 31 + listId.charCodeAt(i)) >>> 0;
-  return `var(${LIST_COLORS[h % LIST_COLORS.length]})`;
+  return LIST_COLORS[h % LIST_COLORS.length];
 }
 
 function cssEscape(value: string): string {
